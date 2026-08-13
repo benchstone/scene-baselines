@@ -1,0 +1,18 @@
+# This repository is a Unity package, not a Unity project — there is no
+# Library/, Temp/ or build output to ignore. Keep .meta files: Unity needs
+# them, and dropping one regenerates a fresh GUID that breaks references.
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.user

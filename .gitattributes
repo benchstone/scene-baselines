@@ -1,0 +1,15 @@
+# Normalise line endings so a mixed Windows/macOS team does not see a whole
+# file rewritten as a change. This package exists to make real changes legible;
+# it should not generate noise of its own.
+* text=auto eol=lf
+
+*.cs      text eol=lf diff=csharp
+*.meta    text eol=lf
+*.asmdef  text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+
+# Unity YAML does not merge line-by-line; never let a tool try.
+*.unity   -merge
+*.prefab  -merge
+*.asset   -merge

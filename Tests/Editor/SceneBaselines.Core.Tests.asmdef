@@ -1,0 +1,19 @@
+{
+    "name": "SceneBaselines.Core.Tests",
+    "rootNamespace": "",
+    "references": [
+        "SceneBaselines.Core",
+        "SceneBaselines.Core.TestFixtures"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
