@@ -8,6 +8,11 @@ Thumbs.db
 desktop.ini
 *.swp
 *~
+# ...but a trailing ~ is how UPM marks a folder Unity must not import, so those
+# are real content here and must not be caught by the rule above.
+!Tools~/
+!Documentation~/
+!Samples~/
 
 # IDE
 .idea/
