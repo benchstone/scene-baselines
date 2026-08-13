@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Costs nothing and needs no secrets, so it is the job that must always be green.
+  # It catches the package defects that are invisible in the editor you built it in.
+  package:
+    name: Package structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source file has a .meta
+        run: |
+          missing=0
+          while IFS= read -r f; do
+            [ -f "$f.meta" ] || { echo "::error file=$f::no .meta — Unity will generate a fresh GUID and break references to this file"; missing=1; }
+          done < <(find Editor Tests -type f \( -name '*.cs' -o -name '*.asmdef' \))
+          # Folders need them too; a missing folder .meta reimports as a new folder.
+          while IFS= read -r d; do
+            [ -f "$d.meta" ] || { echo "::error file=$d::no .meta for folder"; missing=1; }
+          done < <(find Editor Tests -type d)
+          exit $missing
+
+      - name: No stray .meta without its file
+        run: |
+          orphan=0
+          while IFS= read -r m; do
+            target="${m%.meta}"
+            [ -e "$target" ] || { echo "::error file=$m::.meta with nothing to describe"; orphan=1; }
+          done < <(find . -name '*.meta' -not -path './.git/*')
+          exit $orphan
+
+      - name: package.json is valid, and its version matches the changelog
+        run: |
+          fail=0
+          for field in name version displayName description unity author \
+                       documentationUrl changelogUrl licensesUrl; do
+            grep -q "\"$field\"" package.json || { echo "::error file=package.json::missing \"$field\""; fail=1; }
+          done
+
+          version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -1)
+          logged=$(sed -n 's/^## \[\([^]]*\)\].*/\1/p' CHANGELOG.md | head -1)
+
+          if [ -z "$logged" ]; then
+            echo "::error file=CHANGELOG.md::no version heading of the form '## [x.y.z]'"
+            fail=1
+          elif [ "$version" != "$logged" ]; then
+            echo "::error::package.json says $version, CHANGELOG.md's newest entry says $logged"
+            fail=1
+          fi
+
+          [ $fail -eq 0 ] && echo "package.json $version — consistent with the changelog"
+          exit $fail
+
+      - name: The package makes no network calls
+        run: |
+          # The pitch is that a check is deterministic and offline. This keeps that true.
+          if grep -rnE 'UnityWebRequest|HttpClient|WebClient|System\.Net|Socket' Editor/; then
+            echo "::error::the package must make no network calls — see the claim in README.md"
+            exit 1
+          fi
+          echo "no network calls in Editor/"
+
+  # Needs a Unity licence, which only the repo owner can add. Gated on the secret so
+  # a fork, or this repo before the secret exists, reports a clean skip and not a red X.
+  licence:
+    name: Unity licence available?
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        run: |
+          if [ -n "$UNITY_LICENSE" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::UNITY_LICENSE is not set, so the EditMode tests are skipped. See README, 'Running the tests'."
+          fi
+
+  tests:
+    name: EditMode tests
+    runs-on: ubuntu-latest
+    needs: [package, licence]
+    if: needs.licence.outputs.present == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      # The repo is a package, not a project. CI~/TestProject is a minimal project that
+      # installs it by relative path; the trailing ~ keeps Unity from importing it when
+      # somebody installs this package for real.
+      - uses: actions/cache@v4
+        with:
+          path: CI~/TestProject/Library
+          key: Library-${{ hashFiles('CI~/TestProject/Packages/manifest.json') }}
+          restore-keys: Library-
+
+      - uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: CI~/TestProject
+          testMode: editmode
+          artifactsPath: test-results
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          checkName: EditMode test results
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results

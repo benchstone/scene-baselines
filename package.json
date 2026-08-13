@@ -13,7 +13,12 @@
     "scene"
   ],
   "author": {
-    "name": "Saba Shalvashvili"
+    "name": "Saba Shalvashvili",
+    "email": "sabashalvashvili1@gmail.com",
+    "url": "https://github.com/Saba123625"
   },
+  "documentationUrl": "https://github.com/Saba123625/scene-baselines#readme",
+  "changelogUrl": "https://github.com/Saba123625/scene-baselines/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/Saba123625/scene-baselines/blob/main/LICENSE.md",
   "license": "SEE LICENSE IN LICENSE.md"
 }

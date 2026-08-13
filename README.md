@@ -1,5 +1,7 @@
 # Scene Baselines
 
+[![CI](https://github.com/Saba123625/scene-baselines/actions/workflows/ci.yml/badge.svg)](https://github.com/Saba123625/scene-baselines/actions/workflows/ci.yml)
+
 Record what a Unity scene looks like when it is known-good. Find out when it stops matching.
 
 Nobody writes a rule saying *"the camera should be at z = -10"*. So when it moves, no test
@@ -82,6 +84,23 @@ damage precisely.
 pretty-printed JSON so they can be reviewed in a pull request. When someone accepts a change, the
 diff shows what they accepted — a second pair of eyes, on the workflow your team already uses.
 Read them with `git diff --word-diff`; the state is one long line per object.
+
+## Running the tests
+
+**Window ▸ General ▸ Test Runner ▸ EditMode.** The suite runs against throwaway objects — no
+Play Mode, no scene of yours is touched, nothing is written.
+
+Two of the seventeen groups need a saved scene open, and the Test Runner opens an untitled one
+for the duration of a run, so they report as **skipped with the reason**. The menu entry
+**Scene Baselines ▸ Tests ▸ Property Capture (free)** runs all seventeen against whatever scene
+you have open, and is the one to use before trusting a release.
+
+For tests to appear at all, the project's `Packages/manifest.json` needs this package listed as
+testable:
+
+```json
+"testables": [ "com.sabashalvashvili.scenebaselines" ]
+```
 
 ## Licence
 

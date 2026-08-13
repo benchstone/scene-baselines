@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -22,18 +23,131 @@ namespace SceneBaselines
     // it catches nothing at all, so the no-drift and not-serialized cases below matter as much as
     // the detection cases.
     //
-    // Menu:  Scene Baselines/Tests/Property Capture (free)
-    // Batch: -executeMethod PropertyCaptureTest.RunBatch
-    public static class PropertyCaptureTest
+    // Three ways in, one body of checks:
+    //   Test Runner:  Window ▸ General ▸ Test Runner ▸ EditMode
+    //   Menu:         Scene Baselines/Tests/Property Capture (free)
+    //   Batch:        -runTests -testPlatform EditMode   (or -executeMethod
+    //                 SceneBaselines.PropertyCaptureTest.RunBatch for the single-exit-code form)
+    //
+    // The [Test] methods below are the real entry points. They are deliberately thin — each one
+    // runs a group from the same code the menu runs, so the two can never drift into checking
+    // different things. What the attributes buy is DISCOVERY: a group added to this file shows up
+    // in Test Runner and in CI whether or not somebody remembered to add it to a list.
+    [TestFixture]
+    public class PropertyCaptureTest
     {
         public static void RunBatch() => EditorApplication.Exit(Run() == 0 ? 0 : 2);
 
         [MenuItem("Scene Baselines/Tests/Property Capture (free)")]
         public static void RunMenu() => Run();
 
+        // ── Test Runner surface ──────────────────────────────────────────────────
+        //
+        // [Order] is not decoration. These groups share one piece of global state — the scene the
+        // editor has open — and some of them open, add to and close scenes to do their work. Run
+        // them in NUnit's default alphabetical order and two fail: the additive-scene group lands
+        // while an earlier group still has an untitled scene open, and the root-order group reads
+        // a scene a previous group left behind.
+        //
+        // The order below is the one the suite was written and proven in. Keeping it explicit is
+        // the honest fix: the dependency was always there, silently held by the order of the calls
+        // in Run(), and is now stated where it can be seen. Isolating each group from the open
+        // scene would be better still, and is worth doing before this suite grows.
+
+        [Test, Order(1)] public void Detects_property_changes() => Verify(CheckDetectsPropertyChanges);
+        [Test, Order(2)] public void Does_not_invent_changes() => Verify(CheckDoesNotInventChanges);
+        [Test, Order(3)] public void Record_is_portable() => Verify(CheckRecordIsPortable);
+        [Test, Order(4)] public void Report_is_readable() => Verify(CheckReportIsReadable);
+        [Test, Order(5)] public void Inactive_objects_are_covered() => Verify(CheckInactiveObjectsAreCovered);
+        [Test, Order(6)] public void Asset_contents_are_covered() => Verify(CheckAssetContentsAreCovered);
+        [Test, Order(7)] public void Settings_are_covered() => Verify(CheckSettingsAreCovered);
+        [Test, Order(8)] public void Only_the_active_scene_is_captured()
+        {
+            RequiresASavedSceneOpen();
+            Verify(CheckOnlyTheActiveSceneIsCaptured);
+        }
+
+        [Test, Order(9)] public void Child_order_is_covered() => Verify(CheckChildOrderIsCovered);
+        [Test, Order(10)] public void Identity_matching_survives_rename_and_reparent() => Verify(CheckIdentityMatching);
+        [Test, Order(11)] public void Capture_produces_identities() => Verify(CheckCaptureProducesIdentities);
+        [Test, Order(12)] public void Accept_rewrites_only_what_was_chosen() => Verify(CheckAcceptRewritesOnlyWhatWasChosen);
+        [Test, Order(13)] public void Order_compares_as_subsequence() => Verify(CheckOrderComparesAsSubsequence);
+        [Test, Order(14)] public void Order_change_names_what_moved() => Verify(CheckOrderChangeNamesWhatMoved);
+        [Test, Order(15)] public void Root_order_is_covered()
+        {
+            RequiresASavedSceneOpen();
+            Verify(CheckRootOrderIsCovered);
+        }
+
+        [Test, Order(16)] public void Additions_speak_only_when_suspicious() => Verify(CheckAdditionsSpeakOnlyWhenSuspicious);
+        [Test, Order(17)] public void Dedup_covers_every_section() => Verify(CheckDedupCoversEverySection);
+
+        /// <summary>
+        /// Skips the calling test, with the reason, unless a saved scene is open.
+        /// </summary>
+        /// <remarks>
+        /// Two groups read or add to the scene the editor has open, so they need a real one: the
+        /// additive-scene group cannot even start against an untitled scene, because Unity refuses
+        /// to add a scene alongside one that has never been saved.
+        ///
+        /// Running from the menu that holds, since the user has a scene open. Under the Test
+        /// Runner it does not — it swaps in a fresh untitled scene for the run — so these two are
+        /// reported as SKIPPED with the reason instead of failing, which would be a false alarm
+        /// about the product rather than a fact about the environment. The menu entry point still
+        /// exercises them fully.
+        ///
+        /// Better than either would be for the groups to open a scene of their own and put back
+        /// what they found. That is worth doing, and would let CI cover these two as well.
+        /// </remarks>
+        private static void RequiresASavedSceneOpen()
+        {
+            Scene active = SceneManager.GetActiveScene();
+            if (active.IsValid() && !string.IsNullOrEmpty(active.path) && !active.isDirty)
+                return;
+
+            Assert.Ignore(
+                "Needs a saved scene open, and the active scene is " +
+                (string.IsNullOrEmpty(active.path) ? "untitled" : $"'{active.path}'") +
+                (active.isDirty ? " with unsaved changes" : "") +
+                ". The Test Runner opens an untitled scene for the run; use the menu entry " +
+                "'Scene Baselines/Tests/Property Capture (free)' to cover this group.");
+        }
+
+        /// <summary>
+        /// Runs one group and reports every assertion that failed, not just the first.
+        /// </summary>
+        /// <remarks>
+        /// The groups count failures rather than throwing, so one bad assertion does not hide the
+        /// nine after it — that property is worth keeping, so this collects the messages and fails
+        /// once with all of them. Throwaway objects are destroyed even when a group throws.
+        /// </remarks>
+        private static void Verify(System.Func<List<GameObject>, int> group)
+        {
+            Failures.Clear();
+            var created = new List<GameObject>();
+            try
+            {
+                group(created);
+            }
+            finally
+            {
+                foreach (GameObject go in created)
+                {
+                    if (go != null)
+                        UnityEngine.Object.DestroyImmediate(go);
+                }
+            }
+
+            if (Failures.Count > 0)
+                Assert.Fail($"{Failures.Count} assertion(s) failed:\n  - {string.Join("\n  - ", Failures)}");
+        }
+
+        private static void Verify(System.Func<int> group) => Verify(_ => group());
+
         private static int Run()
         {
             int failures = 0;
+            Failures.Clear();
             var created = new List<GameObject>();
 
             try
@@ -83,13 +197,13 @@ namespace SceneBaselines
             BoxCollider box = wall.AddComponent<BoxCollider>();
             string solid = Capture(wall);
             box.isTrigger = true;
-            failures += Assert("a flipped isTrigger is recorded", solid != Capture(wall));
+            failures += Held("a flipped isTrigger is recorded", solid != Capture(wall));
 
             GameObject crate = New(created, "Crate");
             Rigidbody body = crate.AddComponent<Rigidbody>();
             string light = Capture(crate);
             body.mass = 40f;
-            failures += Assert("a changed mass is recorded", light != Capture(crate));
+            failures += Held("a changed mass is recorded", light != Capture(crate));
 
             // A disabled renderer is still a renderer, and components=[…] cannot tell the
             // difference — the object just silently stops being visible. Unity does not return
@@ -99,10 +213,10 @@ namespace SceneBaselines
             // enabled flag went unrecorded.
             GameObject lamp = New(created, "Lamp");
             MeshRenderer renderer = lamp.AddComponent<MeshRenderer>();
-            failures += Assert("an enabled component records enabled=true",
+            failures += Held("an enabled component records enabled=true",
                 Capture(lamp).Contains("enabled=true"));
             renderer.enabled = false;
-            failures += Assert("a disabled component records enabled=false",
+            failures += Held("a disabled component records enabled=false",
                 Capture(lamp).Contains("enabled=false"));
 
             // A user's own script — the case that matters most, and the one no list of built-in
@@ -111,7 +225,7 @@ namespace SceneBaselines
             PropertyFixture tuned = player.AddComponent<PropertyFixture>();
             string authored = Capture(player);
             tuned.speed = 12f;
-            failures += Assert("a changed public field on a user script is recorded",
+            failures += Held("a changed public field on a user script is recorded",
                 authored != Capture(player));
 
             // [SerializeField] private is how most Unity code stores tuned values. Reflection over
@@ -119,7 +233,7 @@ namespace SceneBaselines
             tuned.speed = 5f;
             string beforeHidden = Capture(player);
             tuned.SetHiddenTuning(99f);
-            failures += Assert("a changed [SerializeField] private field is recorded",
+            failures += Held("a changed [SerializeField] private field is recorded",
                 beforeHidden != Capture(player));
 
             // A reference going null is one of the failures studios already write asserts for.
@@ -128,8 +242,8 @@ namespace SceneBaselines
             string linked = Capture(player);
             tuned.linkedTarget = null;
             string unlinked = Capture(player);
-            failures += Assert("a reference going missing is recorded", linked != unlinked);
-            failures += Assert("a missing reference is recorded as such", unlinked.Contains("=none"));
+            failures += Held("a reference going missing is recorded", linked != unlinked);
+            failures += Held("a missing reference is recorded as such", unlinked.Contains("=none"));
 
             return failures;
         }
@@ -147,18 +261,18 @@ namespace SceneBaselines
             // The single most important assertion here. If two captures of an untouched object
             // ever differ, every baseline reports regressions forever and the feature is worse
             // than useless — it trains its user to ignore it.
-            failures += Assert("two captures of an untouched object are identical",
+            failures += Held("two captures of an untouched object are identical",
                 Capture(stable) == Capture(stable));
 
             // Not serialized, so not authored state. Recording it would report a change nobody made.
             var fixture = stable.GetComponent<PropertyFixture>();
             string before = Capture(stable);
             fixture.runtimeOnly = 123f;
-            failures += Assert("a [NonSerialized] field is not recorded", before == Capture(stable));
+            failures += Held("a [NonSerialized] field is not recorded", before == Capture(stable));
 
             // The transform is recorded above as pos/rot/scale, in a form that survives a resized
             // Game View. Recording it again as properties would undo that care.
-            failures += Assert("the transform is not recorded twice",
+            failures += Held("the transform is not recorded twice",
                 !Capture(stable).Contains("props:Transform"));
 
             return failures;
@@ -177,16 +291,16 @@ namespace SceneBaselines
             second.transform.SetParent(panel.transform);
 
             string ordered = Capture(panel);
-            failures += Assert("a parent records its children in order",
+            failures += Held("a parent records its children in order",
                 ordered.Contains("children=(First,Second)"));
 
             // Under a Canvas this IS draw order, so it must not read as unchanged.
             second.transform.SetSiblingIndex(0);
             string swapped = Capture(panel);
-            failures += Assert("reordering children changes the parent's record", ordered != swapped);
+            failures += Held("reordering children changes the parent's record", ordered != swapped);
 
             BaselineComparison comparison = CompareStates(ordered, swapped);
-            failures += Assert("a reorder is reported once, against the parent",
+            failures += Held("a reorder is reported once, against the parent",
                 comparison.findings.Count == 1 &&
                 comparison.findings[0].changedSegments.Any(s => s.StartsWith("children")));
 
@@ -196,7 +310,7 @@ namespace SceneBaselines
             GameObject onlyChild = New(created, "Solo");
             var lonely = new GameObject("Lonely");
             lonely.transform.SetParent(onlyChild.transform);
-            failures += Assert("a single child records no order, which cannot differ",
+            failures += Held("a single child records no order, which cannot differ",
                 !Capture(onlyChild).Contains("children="));
 
             return failures;
@@ -217,15 +331,15 @@ namespace SceneBaselines
 
             // Object IDs are regenerated on every domain reload. One recorded in a baseline would
             // make the next script compile look like a scene-wide regression.
-            failures += Assert("no object ID is recorded",
+            failures += Held("no object ID is recorded",
                 !state.Contains(target.GetEntityId().ToString()));
-            failures += Assert("a reference is recorded by name", state.Contains("Target"));
+            failures += Held("a reference is recorded by name", state.Contains("Target"));
 
             // Truncation must announce itself. A record that quietly covers less than it appears to
             // is the exact false confidence this layer exists to remove.
             GameObject heavy = New(created, "Heavy");
             heavy.AddComponent<ManyPropertyFixture>();
-            failures += Assert("dropping properties past the cap is announced",
+            failures += Held("dropping properties past the cap is announced",
                 Capture(heavy).Contains("truncated=("));
 
             // A stock renderer must fit inside the budget. When baking flags fill it instead, the
@@ -234,7 +348,7 @@ namespace SceneBaselines
             GameObject rendered = New(created, "Rendered");
             rendered.AddComponent<MeshFilter>();
             rendered.AddComponent<MeshRenderer>();
-            failures += Assert("a stock renderer fits without truncation",
+            failures += Held("a stock renderer fits without truncation",
                 !Capture(rendered).Contains("truncated=("));
 
             return failures;
@@ -254,7 +368,7 @@ namespace SceneBaselines
 
             BaselineComparison comparison = CompareStates(recorded, live);
 
-            failures += Assert("the flipped isTrigger is reported as one finding",
+            failures += Held("the flipped isTrigger is reported as one finding",
                 comparison.findings.Count == 1);
 
             List<string> segments = comparison.findings.Count == 1
@@ -263,10 +377,10 @@ namespace SceneBaselines
 
             // Narrowed to the field that changed. Printing two near-identical hundred-character
             // strings is the unreadable YAML diff developers already have and already ignore.
-            failures += Assert("the finding names the property that changed",
+            failures += Held("the finding names the property that changed",
                 segments.Any(s => s.IndexOf("IsTrigger", System.StringComparison.OrdinalIgnoreCase) >= 0));
 
-            failures += Assert("the finding shows the old and new value",
+            failures += Held("the finding shows the old and new value",
                 segments.Any(s => s.Contains("false") && s.Contains("true")));
 
             // A moved object must still read as one line about position, not as the old position
@@ -276,7 +390,7 @@ namespace SceneBaselines
             moved.transform.position = new Vector3(3f, 0f, 0f);
 
             BaselineComparison movedComparison = CompareStates(atOrigin, Capture(moved));
-            failures += Assert("a moved object reports a single position line",
+            failures += Held("a moved object reports a single position line",
                 movedComparison.findings.Count == 1 &&
                 movedComparison.findings[0].changedSegments.Count(s => s.StartsWith("pos")) == 1);
 
@@ -291,14 +405,14 @@ namespace SceneBaselines
 
             GameObject toggled = New(created, "Toggled");
             string on = Capture(toggled);
-            failures += Assert("an active object records active=true", on.Contains("active=true"));
+            failures += Held("an active object records active=true", on.Contains("active=true"));
 
             toggled.SetActive(false);
             string off = Capture(toggled);
-            failures += Assert("a deactivated object records active=false", off.Contains("active=false"));
+            failures += Held("a deactivated object records active=false", off.Contains("active=false"));
 
             BaselineComparison comparison = CompareStates(on, off);
-            failures += Assert("deactivating an object is reported as a change to it",
+            failures += Held("deactivating an object is reported as a change to it",
                 comparison.findings.Count == 1 &&
                 comparison.findings[0].kind == RegressionKind.Changed &&
                 comparison.findings[0].changedSegments.Any(s => s.StartsWith("active")));
@@ -344,7 +458,7 @@ namespace SceneBaselines
                 bool found = SceneCapture.CaptureBaselineObjects()
                     .Any(o => o.path != null && o.path.EndsWith("SceneBaselinesInactiveProbe"));
 
-                return Assert("the scene sweep captures inactive objects", found);
+                return Held("the scene sweep captures inactive objects", found);
             }
             finally
             {
@@ -373,26 +487,26 @@ namespace SceneBaselines
             {
                 string original = SceneCapture.DescribeAsset(material);
 
-                failures += Assert("a material records its shader", original.Contains("shader="));
+                failures += Held("a material records its shader", original.Contains("shader="));
 
                 // The whole reason this is not the generic serialized dump. A material's tuned
                 // values sit at depth 3-5 behind an entry per texture slot, so a depth-limited
                 // walk records pages of texture boilerplate and never reaches the colour.
-                failures += Assert("a material records a named shader property",
+                failures += Held("a material records a named shader property",
                     original.Contains("_BaseColor=") || original.Contains("_Color="));
 
                 string colourProperty = material.HasProperty("_BaseColor") ? "_BaseColor" : "_Color";
                 material.SetColor(colourProperty, new Color(0.1f, 0.9f, 0.3f, 1f));
                 string recoloured = SceneCapture.DescribeAsset(material);
 
-                failures += Assert("recolouring a material changes its record", original != recoloured);
+                failures += Held("recolouring a material changes its record", original != recoloured);
 
                 BaselineComparison comparison = CompareAssetStates(original, recoloured);
-                failures += Assert("a recoloured material is one asset finding",
+                failures += Held("a recoloured material is one asset finding",
                     comparison.findings.Count == 1 &&
                     comparison.findings[0].kind == RegressionKind.AssetChanged);
 
-                failures += Assert("the finding names the shader property that changed",
+                failures += Held("the finding names the shader property that changed",
                     comparison.findings.Count == 1 &&
                     comparison.findings[0].changedSegments.Any(s => s.StartsWith(colourProperty)));
 
@@ -402,8 +516,8 @@ namespace SceneBaselines
                 // has to change, and has to name the shader it ended up with.
                 material.shader = null;
                 string broken = SceneCapture.DescribeAsset(material);
-                failures += Assert("a material losing its shader changes its record", broken != recoloured);
-                failures += Assert("a material losing its shader records the error shader",
+                failures += Held("a material losing its shader changes its record", broken != recoloured);
+                failures += Held("a material losing its shader records the error shader",
                     broken.Contains("InternalErrorShader"));
             }
             finally
@@ -415,7 +529,7 @@ namespace SceneBaselines
             // them and found nothing — the silence is identical, the meaning is opposite.
             var older = new Baseline { schemaVersion = BaselineStore.AssetSchemaVersion - 1 };
             var current = new Baseline { schemaVersion = BaselineStore.AssetSchemaVersion };
-            failures += Assert("a pre-asset baseline reports that it does not cover assets",
+            failures += Held("a pre-asset baseline reports that it does not cover assets",
                 !older.RecordsAssets && current.RecordsAssets);
 
             return failures;
@@ -450,32 +564,32 @@ namespace SceneBaselines
 
             List<SceneCapture.SceneSettingsRecord> settings = SceneCapture.CaptureSettings();
 
-            failures += Assert("scene render settings are recorded",
+            failures += Held("scene render settings are recorded",
                 settings.Any(s => s.scope == "scene" && s.group == "render" && s.state.Contains("fog=")));
-            failures += Assert("project physics settings are recorded",
+            failures += Held("project physics settings are recorded",
                 settings.Any(s => s.scope == "project" && s.group == "physics" && s.state.Contains("gravity=")));
 
             // 2D was barely covered in the first version — gravity only — while 3D was covered in
             // full. A 2D project had its physics effectively unchecked.
-            failures += Assert("2D physics settings are recorded to the same depth as 3D",
+            failures += Held("2D physics settings are recorded to the same depth as 3D",
                 settings.Any(s => s.group == "physics" &&
                     s.state.Contains("gravity2D=") && s.state.Contains("velocityIterations2D=")));
-            failures += Assert("the 2D collision matrix has its own group",
+            failures += Held("the 2D collision matrix has its own group",
                 settings.Any(s => s.group == "layers2D" && s.state.Contains("ignoredPairs=")));
 
-            failures += Assert("scripting defines and the active build target are recorded",
+            failures += Held("scripting defines and the active build target are recorded",
                 settings.Any(s => s.group == "defines" &&
                     s.state.Contains("defines=") && s.state.Contains("activeBuildTarget=")));
-            failures += Assert("the build scene list is recorded",
+            failures += Held("the build scene list is recorded",
                 settings.Any(s => s.group == "build" && s.state.Contains("count=")));
-            failures += Assert("input axes are recorded",
+            failures += Held("input axes are recorded",
                 settings.Any(s => s.group == "input" && s.state.Contains("axis00=")));
-            failures += Assert("tags and layers are recorded",
+            failures += Held("tags and layers are recorded",
                 settings.Any(s => s.group == "tags" && s.state.Contains("tags=") && s.state.Contains("layers=")));
 
             // Runtime state, not an authored setting. Recording it would report a regression
             // because somebody paused the game.
-            failures += Assert("timeScale is not recorded",
+            failures += Held("timeScale is not recorded",
                 !settings.Any(s => s.state.Contains("timeScale")));
 
             // Found live: LightmapsMode is a FLAGS enum stringifying as "Single, Dual", and an
@@ -483,11 +597,11 @@ namespace SceneBaselines
             // it. Any value containing a space must be wrapped in parens, which keeps splitting
             // depth-aware and the state string parseable.
             foreach (SceneCapture.SceneSettingsRecord record in settings)
-                failures += Assert($"{record.scope}/{record.group} has no unwrapped spaces in values",
+                failures += Held($"{record.scope}/{record.group} has no unwrapped spaces in values",
                     !HasUnwrappedSpace(record.state));
 
             // Two captures with nothing touched in between must agree, or every check cries wolf.
-            failures += Assert("two captures of untouched settings agree",
+            failures += Held("two captures of untouched settings agree",
                 string.Join("|", settings.Select(s => s.state)) ==
                 string.Join("|", SceneCapture.CaptureSettings().Select(s => s.state)));
 
@@ -500,14 +614,14 @@ namespace SceneBaselines
                 Physics.gravity = new Vector3(0f, -2f, 0f);
                 string after = SceneCapture.CaptureSettings().First(s => s.group == "physics").state;
 
-                failures += Assert("changed gravity changes the record", before != after);
+                failures += Held("changed gravity changes the record", before != after);
 
                 BaselineComparison comparison = CompareSettingsStates("project", "physics", before, after);
-                failures += Assert("changed gravity is one settings finding",
+                failures += Held("changed gravity is one settings finding",
                     comparison.findings.Count == 1 &&
                     comparison.findings[0].kind == RegressionKind.SettingsChanged &&
                     comparison.findings[0].path == "project/physics");
-                failures += Assert("the finding names gravity",
+                failures += Held("the finding names gravity",
                     comparison.findings.Count == 1 &&
                     comparison.findings[0].changedSegments.Any(s => s.StartsWith("gravity")));
             }
@@ -525,9 +639,9 @@ namespace SceneBaselines
                 Physics.IgnoreLayerCollision(0, 1, !ignoredBefore);
                 string layersAfter = SceneCapture.CaptureSettings().First(s => s.group == "layers").state;
 
-                failures += Assert("a changed layer collision pair changes the record",
+                failures += Held("a changed layer collision pair changes the record",
                     layersBefore != layersAfter);
-                failures += Assert("layer collisions are recorded by name, not as bitmasks",
+                failures += Held("layer collisions are recorded by name, not as bitmasks",
                     layersAfter.Contains(LayerMask.LayerToName(0)) || layersBefore.Contains(LayerMask.LayerToName(0)));
             }
             finally
@@ -537,7 +651,7 @@ namespace SceneBaselines
 
             var older = new Baseline { schemaVersion = BaselineStore.SettingsSchemaVersion - 1 };
             var current = new Baseline { schemaVersion = BaselineStore.SettingsSchemaVersion };
-            failures += Assert("a pre-settings baseline reports that it does not cover settings",
+            failures += Held("a pre-settings baseline reports that it does not cover settings",
                 !older.RecordsSettings && current.RecordsSettings);
 
             return failures;
@@ -639,13 +753,13 @@ namespace SceneBaselines
 
                 // The whole bug: this used to be `before + 1`, and the object would then report
                 // MISSING on every later check made without the second scene open.
-                failures += Assert("an object in another loaded scene is not captured",
+                failures += Held("an object in another loaded scene is not captured",
                     captured.Count == before &&
                     !captured.Any(o => o.path != null && o.path.EndsWith("SceneBaselinesForeignProbe")));
 
                 // A never-saved scene reports an empty name, which would print as a blank in the
                 // report and read as a bug rather than as a fact about the scene.
-                failures += Assert("the other loaded scene is recorded as context",
+                failures += Held("the other loaded scene is recorded as context",
                     SceneCapture.OtherLoadedScenes()
                         .Contains(SceneCapture.UnsavedSceneName));
             }
@@ -656,7 +770,7 @@ namespace SceneBaselines
                 clearDirtiness.Invoke(null, new object[] { active });
             }
 
-            failures += Assert("closing the extra scene leaves the sweep as it was",
+            failures += Held("closing the extra scene leaves the sweep as it was",
                 SceneCapture.CaptureBaselineObjects().Count == before);
 
             return failures;
@@ -710,11 +824,11 @@ namespace SceneBaselines
                 new List<BaselineObjectRecord> { Rec("Player", "state=1", idA) },
                 new List<BaselineObjectRecord> { Rec("Hero", "state=1", idA) });
 
-            failures += Assert("a renamed object is reported as MOVED, not MISSING",
+            failures += Held("a renamed object is reported as MOVED, not MISSING",
                 renamed.findings.Count == 1 && renamed.findings[0].kind == RegressionKind.Moved);
-            failures += Assert("a renamed object names where it went now",
+            failures += Held("a renamed object names where it went now",
                 renamed.findings.Count == 1 && renamed.findings[0].livePath == "Hero");
-            failures += Assert("a renamed object is not also counted as a new object",
+            failures += Held("a renamed object is not also counted as a new object",
                 renamed.newObjectCount == 0);
 
             // Re-parented: the case named in the coverage limits.
@@ -722,7 +836,7 @@ namespace SceneBaselines
                 new List<BaselineObjectRecord> { Rec("Enemies/Grunt", "state=1", idA) },
                 new List<BaselineObjectRecord> { Rec("Pool/Grunt", "state=1", idA) });
 
-            failures += Assert("a re-parented object is reported as MOVED, not MISSING",
+            failures += Held("a re-parented object is reported as MOVED, not MISSING",
                 reparented.findings.Count == 1 && reparented.findings[0].kind == RegressionKind.Moved);
 
             // The point of a MISSING line is that it means something. A deletion must still report it.
@@ -730,7 +844,7 @@ namespace SceneBaselines
                 new List<BaselineObjectRecord> { Rec("Player", "state=1", idA) },
                 new List<BaselineObjectRecord>());
 
-            failures += Assert("a genuinely deleted object is still reported as MISSING",
+            failures += Held("a genuinely deleted object is still reported as MISSING",
                 deleted.findings.Count == 1 && deleted.findings[0].kind == RegressionKind.Missing);
 
             // Identity must beat the path, or a newcomer at the old path absorbs the match and the
@@ -743,11 +857,11 @@ namespace SceneBaselines
                     Rec("Hero", "state=1", idA)
                 });
 
-            failures += Assert("identity wins over a new object occupying the old path",
+            failures += Held("identity wins over a new object occupying the old path",
                 displaced.findings.Count == 1 &&
                 displaced.findings[0].kind == RegressionKind.Moved &&
                 displaced.findings[0].livePath == "Hero");
-            failures += Assert("the newcomer at the old path counts as added, not as a change",
+            failures += Held("the newcomer at the old path counts as added, not as a change",
                 displaced.newObjectCount == 1);
 
             // Same-named siblings: "#n" is assigned by capture order, so twins could pair up wrongly
@@ -756,7 +870,7 @@ namespace SceneBaselines
                 new List<BaselineObjectRecord> { Rec("Twin", "state=A", idA), Rec("Twin#2", "state=B", idB) },
                 new List<BaselineObjectRecord> { Rec("Twin", "state=B", idB), Rec("Twin#2", "state=A", idA) });
 
-            failures += Assert("same-named siblings pair by identity, not by suffix order",
+            failures += Held("same-named siblings pair by identity, not by suffix order",
                 twins.findings.All(f => f.kind == RegressionKind.Moved));
 
             // The fallback. A pre-v10 baseline has no ids at all and must behave exactly as before,
@@ -765,25 +879,25 @@ namespace SceneBaselines
                 new List<BaselineObjectRecord> { Rec("Player", "state=1", "") },
                 new List<BaselineObjectRecord> { Rec("Player", "state=2", "") });
 
-            failures += Assert("a baseline without ids still matches by path",
+            failures += Held("a baseline without ids still matches by path",
                 legacy.findings.Count == 1 && legacy.findings[0].kind == RegressionKind.Changed);
 
             BaselineComparison legacyClean = CompareObjects(
                 new List<BaselineObjectRecord> { Rec("Player", "state=1", "") },
                 new List<BaselineObjectRecord> { Rec("Player", "state=1", "") });
 
-            failures += Assert("a baseline without ids reports no finding when nothing changed",
+            failures += Held("a baseline without ids reports no finding when nothing changed",
                 legacyClean.findings.Count == 0);
 
             // An id-less baseline must not imply identity coverage it does not have.
             var older = new Baseline { schemaVersion = BaselineStore.IdentitySchemaVersion - 1 };
             var current = new Baseline { schemaVersion = BaselineStore.IdentitySchemaVersion };
-            failures += Assert("a pre-identity baseline reports that it matches by path only",
+            failures += Held("a pre-identity baseline reports that it matches by path only",
                 !older.RecordsObjectIds && current.RecordsObjectIds);
 
             // Identities are additive: bumping them must NOT invalidate existing baselines, because a
             // forced re-record would bake today's scene in as known-good and lose the real history.
-            failures += Assert("adding identities did not invalidate existing baselines",
+            failures += Held("adding identities did not invalidate existing baselines",
                 new Baseline { schemaVersion = BaselineStore.IdentitySchemaVersion - 1 }
                     .StateFormatComparable);
 
@@ -818,7 +932,7 @@ namespace SceneBaselines
             BaselineAccept.Result outcome =
                 BaselineAccept.Apply(baseline, new List<RegressionFinding> { changed });
 
-            failures += Assert("accepting a change records the new state",
+            failures += Held("accepting a change records the new state",
                 outcome.acceptedCount == 1 && baseline.objects[0].state == "speed=12");
 
             // The whole point of per-finding accept: an unselected difference must survive untouched.
@@ -828,7 +942,7 @@ namespace SceneBaselines
                 new RegressionFinding { path = "Player", liveId = idA, kind = RegressionKind.Changed, liveState = "speed=12" }
             });
 
-            failures += Assert("accepting one finding leaves the unselected record alone",
+            failures += Held("accepting one finding leaves the unselected record alone",
                 twoObjects.objects.First(o => o.path == "Enemy").state == "hp=3");
 
             // Accepting a move rewrites where the object is expected, and keeps its state.
@@ -842,9 +956,9 @@ namespace SceneBaselines
                 }
             });
 
-            failures += Assert("accepting a move records the new path",
+            failures += Held("accepting a move records the new path",
                 moved.objects[0].path == "Pool/Grunt");
-            failures += Assert("accepting a move records the new state too",
+            failures += Held("accepting a move records the new state too",
                 moved.objects[0].state == "hp=4");
 
             // Accepting a deletion drops the record, so the object stops being expected at all.
@@ -854,7 +968,7 @@ namespace SceneBaselines
                 new RegressionFinding { path = "Target", liveId = "", kind = RegressionKind.Missing }
             });
 
-            failures += Assert("accepting a deletion removes the record",
+            failures += Held("accepting a deletion removes the record",
                 deleted.objects.Count == 1 && deleted.objects[0].path == "Player");
 
             // A finding that matches nothing must be reported, never counted as done. Silently
@@ -866,14 +980,14 @@ namespace SceneBaselines
                     new RegressionFinding { path = "GoneFromBaseline", liveId = "", kind = RegressionKind.Changed, liveState = "x=1" }
                 });
 
-            failures += Assert("a finding matching no record is skipped, not counted as accepted",
+            failures += Held("a finding matching no record is skipped, not counted as accepted",
                 unmatched.acceptedCount == 0 && unmatched.skippedCount == 1);
-            failures += Assert("a skipped finding leaves the baseline untouched",
+            failures += Held("a skipped finding leaves the baseline untouched",
                 stale.objects[0].state == "speed=5" && stale.acceptedFindingCount == 0);
 
             // The grade must travel with the record: a baseline holding accepted findings is no longer
             // purely "what the scene was", and a reader has to be able to tell.
-            failures += Assert("accepting is recorded on the baseline as provenance",
+            failures += Held("accepting is recorded on the baseline as provenance",
                 baseline.acceptedFindingCount == 1 && baseline.HasAcceptedFindings &&
                 !string.IsNullOrEmpty(baseline.lastAcceptedUtc));
 
@@ -882,7 +996,7 @@ namespace SceneBaselines
             BaselineAccept.Result empty =
                 BaselineAccept.Apply(untouched, new List<RegressionFinding>());
 
-            failures += Assert("accepting an empty selection changes nothing",
+            failures += Held("accepting an empty selection changes nothing",
                 empty.acceptedCount == 0 && untouched.objects[0].state == "speed=5" &&
                 !untouched.HasAcceptedFindings);
 
@@ -906,7 +1020,7 @@ namespace SceneBaselines
                 }
             });
 
-            failures += Assert("accepting a settings change records the new setting",
+            failures += Held("accepting a settings change records the new setting",
                 withSettings.settings[0].state == "gravity=-20");
 
             return failures;
@@ -939,7 +1053,7 @@ namespace SceneBaselines
                 return 0;
             }
 
-            return Assert("capture gives every object in a saved scene a stable identity",
+            return Held("capture gives every object in a saved scene a stable identity",
                 live.All(r => !string.IsNullOrEmpty(r.id)));
         }
 
@@ -955,27 +1069,27 @@ namespace SceneBaselines
         {
             int failures = 0;
 
-            failures += Assert("adding a child leaves the parent silent",
+            failures += Held("adding a child leaves the parent silent",
                 CompareStates("children=(A,B)", "children=(A,B,C)").findings.Count == 0);
 
-            failures += Assert("a child inserted between two others is still silent",
+            failures += Held("a child inserted between two others is still silent",
                 CompareStates("children=(A,B)", "children=(A,C,B)").findings.Count == 0);
 
-            failures += Assert("reordering the children that were recorded is reported",
+            failures += Held("reordering the children that were recorded is reported",
                 CompareStates("children=(A,B)", "children=(B,A)").findings.Count == 1);
 
             // A removed child is reported here AND as its own MISSING line, by design: the parent
             // genuinely changed, and the two findings describe different halves of one edit.
-            failures += Assert("a removed child still changes its parent's record",
+            failures += Held("a removed child still changes its parent's record",
                 CompareStates("children=(A,B,C)", "children=(A,C)").findings.Count == 1);
 
-            failures += Assert("a real value change beside an untouched list is still reported",
+            failures += Held("a real value change beside an untouched list is still reported",
                 CompareStates("pos(0,0,0) children=(A)", "pos(1,0,0) children=(A)").findings.Count == 1);
 
-            failures += Assert("a root list that only grew is silent",
+            failures += Held("a root list that only grew is silent",
                 CompareStates("roots=(Ground,Player)", "roots=(Ground,Player,Pickup)").findings.Count == 0);
 
-            failures += Assert("reordering roots is reported",
+            failures += Held("reordering roots is reported",
                 CompareStates("roots=(Ground,Player)", "roots=(Player,Ground)").findings.Count == 1);
 
             return failures;
@@ -990,11 +1104,11 @@ namespace SceneBaselines
 
             // Named, with positions. The alternative — printing both lists — is the unreadable diff
             // this tool exists to replace, and a real project has hundreds of roots.
-            failures += Assert("an order change names the object that moved",
+            failures += Held("an order change names the object that moved",
                 oneMove.Count == 1 && oneMove[0].Contains("C moved 3 → 1 of 3"));
 
             // Comparing by index would report B and C as changed too, because both shifted up one.
-            failures += Assert("objects that merely shifted are not reported as moved",
+            failures += Held("objects that merely shifted are not reported as moved",
                 oneMove.Count == 1 && !oneMove[0].Contains("A ") && !oneMove[0].Contains("B "));
 
             // The scale objection, exactly as asked: one drag among a hundred must stay one line.
@@ -1011,7 +1125,7 @@ namespace SceneBaselines
                     "roots=(" + string.Join(",", reshuffled.ToArray()) + ")")
                 .findings[0].changedSegments;
 
-            failures += Assert("one move among a hundred objects is one line",
+            failures += Held("one move among a hundred objects is one line",
                 big.Count == 1 && big[0].Contains("Obj100 moved 100 → 1 of 100"));
 
             // Where the answer would be a guess, the raw states must come back rather than a
@@ -1019,7 +1133,7 @@ namespace SceneBaselines
             List<string> twins = CompareStates("children=(A,A,B)", "children=(B,A,A)")
                 .findings[0].changedSegments;
 
-            failures += Assert("repeated names fall back instead of guessing which one moved",
+            failures += Held("repeated names fall back instead of guessing which one moved",
                 twins.All(s => !s.Contains("moved")));
 
             return failures;
@@ -1032,19 +1146,19 @@ namespace SceneBaselines
             SceneCapture.SceneSettingsRecord rootOrder = SceneCapture.CaptureSettings()
                 .FirstOrDefault(s => s.scope == "scene" && s.group == "rootOrder");
 
-            failures += Assert("the scene's root order is captured at all", rootOrder != null);
+            failures += Held("the scene's root order is captured at all", rootOrder != null);
 
             if (rootOrder == null)
                 return failures;
 
-            failures += Assert("root order is recorded as an ordered name list",
+            failures += Held("root order is recorded as an ordered name list",
                 rootOrder.state.StartsWith("roots=("));
 
             Scene scene = SceneManager.GetActiveScene();
             GameObject[] roots = scene.GetRootGameObjects();
 
             // The level DescribeChildOrder cannot reach: a root object has no parent to record it.
-            failures += Assert("root order lists the scene's own top-level objects",
+            failures += Held("root order lists the scene's own top-level objects",
                 roots.Length == 0 || rootOrder.state.Contains(roots[0].name));
 
             return failures;
@@ -1073,8 +1187,8 @@ namespace SceneBaselines
                 Rec("Spawner", "components=[Transform] pos(2,0,0)", idB)
             });
 
-            failures += Assert("ordinary new work is not a finding", honest.findings.Count == 0);
-            failures += Assert("added objects are NAMED, not only counted",
+            failures += Held("ordinary new work is not a finding", honest.findings.Count == 0);
+            failures += Held("added objects are NAMED, not only counted",
                 honest.newObjectCount == 1 && honest.newObjectPaths.Contains("Spawner"));
 
             // The stray Ctrl+D: identical in every recorded value, including position.
@@ -1084,7 +1198,7 @@ namespace SceneBaselines
                 Rec("Player#2", "components=[Transform,AudioListener] pos(0,0,0)", idB)
             });
 
-            failures += Assert("an exact duplicate of a baselined object is reported",
+            failures += Held("an exact duplicate of a baselined object is reported",
                 duplicate.findings.Count == 1 && duplicate.findings[0].kind == RegressionKind.Added);
 
             // The copy that was made and then dragged somewhere else, which the state rule misses.
@@ -1094,7 +1208,7 @@ namespace SceneBaselines
                 Rec("Player (1)", "components=[Transform,AudioListener] pos(9,9,9)", idB)
             });
 
-            failures += Assert("an object named like a copy is reported",
+            failures += Held("an object named like a copy is reported",
                 copy.findings.Count == 1 && copy.findings[0].kind == RegressionKind.Added);
 
             // Unity honours one. A second changes behaviour silently, which is this layer's whole
@@ -1105,7 +1219,7 @@ namespace SceneBaselines
                 Rec("Minimap", "components=[Transform,Camera,AudioListener] pos(0,20,0)", idC)
             });
 
-            failures += Assert("a second AudioListener is reported",
+            failures += Held("a second AudioListener is reported",
                 singleton.findings.Count == 1 &&
                 singleton.findings[0].changedSegments[0].Contains("AudioListener"));
 
@@ -1121,7 +1235,7 @@ namespace SceneBaselines
                 }
             });
 
-            failures += Assert("accepting an added object records it as covered",
+            failures += Held("accepting an added object records it as covered",
                 adopting.objects.Any(o => o.path == "Turret" && o.state == "hp=10"));
 
             return failures;
@@ -1140,19 +1254,19 @@ namespace SceneBaselines
 
             const string idA = "GlobalObjectId_V1-2-abc-111-0";
 
-            failures += Assert("an identical candidate is a duplicate",
+            failures += Held("an identical candidate is a duplicate",
                 BaselineStore.RecordsSameState(
                     WithSections(Setting("scene", "rootOrder", "roots=(A,B)")),
                     WithSections(Setting("scene", "rootOrder", "roots=(A,B)"))));
 
-            failures += Assert("the same objects with a changed setting is NOT a duplicate",
+            failures += Held("the same objects with a changed setting is NOT a duplicate",
                 !BaselineStore.RecordsSameState(
                     WithSections(Setting("scene", "rootOrder", "roots=(A,B)")),
                     WithSections(Setting("scene", "rootOrder", "roots=(B,A)"))));
 
             // Coverage the tool has only just learned to capture must be recordable without a
             // schema bump, or the new section can never reach a scene that already has a baseline.
-            failures += Assert("a section the stored baseline lacks is NOT a duplicate",
+            failures += Held("a section the stored baseline lacks is NOT a duplicate",
                 !BaselineStore.RecordsSameState(
                     WithSections(),
                     WithSections(Setting("scene", "rootOrder", "roots=(A,B)"))));
@@ -1169,7 +1283,7 @@ namespace SceneBaselines
                 new BaselineAssetRecord { path = "Assets/M.mat", type = "Material", state = "_Color=(1,0,0,1)" }
             };
 
-            failures += Assert("the same objects with a changed asset is NOT a duplicate",
+            failures += Held("the same objects with a changed asset is NOT a duplicate",
                 !BaselineStore.RecordsSameState(storedAsset, changedAsset));
 
             return failures;
@@ -1218,13 +1332,20 @@ namespace SceneBaselines
             return go;
         }
 
-        private static int Assert(string what, bool held)
+        /// <summary>
+        /// Records one assertion. Returns a count rather than throwing, so a failure does not hide
+        /// the assertions after it — <see cref="Verify"/> reports the whole collected list at once.
+        /// </summary>
+        private static int Held(string what, bool held)
         {
             if (held)
                 return 0;
 
+            Failures.Add(what);
             Debug.LogWarning($"[Scene Baselines] FAILED: {what}");
             return 1;
         }
+
+        private static readonly List<string> Failures = new List<string>();
     }
 }
