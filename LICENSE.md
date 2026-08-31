@@ -2,6 +2,11 @@
 
 <https://polyformproject.org/licenses/shield/1.0.0>
 
+Copyright © 2026 Saba Shalvashvili, trading as Benchstone.
+
+**The licensor** offering these terms is **Saba Shalvashvili, trading as Benchstone**
+(<sabashalvashvili1@gmail.com>). **The software** is *Scene Baselines*.
+
 ## Acceptance
 
 In order to get any license under these terms, you must agree
