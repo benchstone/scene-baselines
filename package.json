@@ -1,5 +1,5 @@
 {
-  "name": "com.sabashalvashvili.scenebaselines",
+  "name": "com.benchstone.scenebaselines",
   "version": "0.1.0",
   "displayName": "Scene Baselines",
   "description": "Record what a Unity scene looks like when it is known-good, then detect when it stops matching. Captures component properties, inactive objects, referenced asset contents and scene/project settings, and reports what changed in terms of objects and properties instead of raw YAML. Deterministic, runs in CI, and makes no network or AI calls.",
@@ -13,12 +13,12 @@
     "scene"
   ],
   "author": {
-    "name": "Saba Shalvashvili",
+    "name": "Benchstone",
     "email": "sabashalvashvili1@gmail.com",
-    "url": "https://github.com/Saba123625"
+    "url": "https://github.com/benchstone"
   },
-  "documentationUrl": "https://github.com/Saba123625/scene-baselines#readme",
-  "changelogUrl": "https://github.com/Saba123625/scene-baselines/blob/main/CHANGELOG.md",
-  "licensesUrl": "https://github.com/Saba123625/scene-baselines/blob/main/LICENSE.md",
+  "documentationUrl": "https://github.com/benchstone/scene-baselines#readme",
+  "changelogUrl": "https://github.com/benchstone/scene-baselines/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/benchstone/scene-baselines/blob/main/LICENSE.md",
   "license": "SEE LICENSE IN LICENSE.md"
 }

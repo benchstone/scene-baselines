@@ -12,7 +12,7 @@
 set -euo pipefail
 
 DEFAULT_PROJECT="$HOME/Desktop/unity's games/puzzle Tbd - debugging"
-PKG_REL="Packages/com.sabashalvashvili.scenebaselines"
+PKG_REL="Packages/com.benchstone.scenebaselines"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

@@ -1,6 +1,6 @@
 # Scene Baselines
 
-[![CI](https://github.com/Saba123625/scene-baselines/actions/workflows/ci.yml/badge.svg)](https://github.com/Saba123625/scene-baselines/actions/workflows/ci.yml)
+[![CI](https://github.com/benchstone/scene-baselines/actions/workflows/ci.yml/badge.svg)](https://github.com/benchstone/scene-baselines/actions/workflows/ci.yml)
 
 Record what a Unity scene looks like when it is known-good. Find out when it stops matching.
 
@@ -20,7 +20,7 @@ and tells you precisely what differs from the last state you agreed was correct.
 Unity ▸ Window ▸ Package Manager ▸ **+** ▸ *Add package from git URL…*
 
 ```
-https://github.com/Saba123625/scene-baselines.git
+https://github.com/benchstone/scene-baselines.git
 ```
 
 Requires Unity **2021.3** or newer. Changes per version are listed in
@@ -99,7 +99,7 @@ For tests to appear at all, the project's `Packages/manifest.json` needs this pa
 testable:
 
 ```json
-"testables": [ "com.sabashalvashvili.scenebaselines" ]
+"testables": [ "com.benchstone.scenebaselines" ]
 ```
 
 ## Licence
