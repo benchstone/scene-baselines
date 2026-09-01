@@ -98,12 +98,22 @@ unsaved changes they refuse to run at all, rather than risk discarding it.
 The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same nineteen against
 whatever scene you have open.
 
-### In CI
+### What CI does and does not check
 
-The workflow activates Unity from an account, using the repository secrets `UNITY_EMAIL` and
-`UNITY_PASSWORD`. There is no licence *file* to hold: Unity 6 issues an entitlement licence rather
-than the legacy `.ulf`, and Unity has discontinued manual activation of Personal licences. Without
-both secrets the test job reports a clean skip rather than a red X, so a fork's CI stays green.
+**CI checks the package's structure, not its behaviour.** Every `.cs` and folder has a `.meta`, no
+`.meta` is orphaned, `package.json` agrees with the changelog, and `Editor/` makes no network calls —
+that last one guards a claim this README makes. A green badge means those four things passed.
+
+**The nineteen EditMode tests are not part of that**, and the badge does not claim they are. They run
+locally, from the Test Runner or the menu entry above, and are the check to trust before a release.
+
+The reason is Unity's, not this package's: running the editor in CI needs an activated licence, and on
+a **Personal** licence there is currently no working headless activation. Unity 6 issues an entitlement
+licence instead of the legacy `.ulf` file that CI actions expect, Unity has discontinued manual
+activation of Personal licences, and the command-line licensing route is documented as not applying to
+Personal at all. The workflow to do it is written and kept in `.github/workflows/ci.yml` — the editor
+installs and the credentials reach it; only activation fails. It is switched off behind the repository
+variable `RUN_UNITY_TESTS`, ready for the day that changes or a Pro licence is available.
 
 For tests to appear at all, the project's `Packages/manifest.json` needs this package listed as
 testable:

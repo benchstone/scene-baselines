@@ -96,11 +96,25 @@ jobs:
             echo "::notice::EditMode tests are skipped without both. See README, 'Running the tests'."
           fi
 
+  # ⚠️ OFF until Unity licence activation works headlessly. Everything in this job is correct and
+  # proven as far as it goes: the editor installs, and the credentials reach it. What fails is the
+  # activation itself, with "License command failed with exit code 26: Unknown Error" — an exit code
+  # Unity does not document. Unity's own manual says the command-line licensing procedures do not
+  # apply to Personal licences and that Personal must be activated by logging into the Hub, so this
+  # may not be solvable from configuration at all.
+  #
+  # It is disabled rather than deleted so re-enabling is one switch, not a rewrite: set the
+  # repository variable RUN_UNITY_TESTS to 'true'.
+  #
+  # 🚨 Being honest about the consequence: CI checks the package's structure and NOT its behaviour.
+  # The nineteen EditMode tests run locally — Test Runner, or Scene Baselines ▸ Tests ▸ Property
+  # Capture (free) — and a green badge here does not claim otherwise. Said plainly in the README too,
+  # because a badge that implies more than it checks is worse than no badge.
   tests:
     name: EditMode tests
     runs-on: ubuntu-latest
     needs: [package, licence]
-    if: needs.licence.outputs.present == 'true'
+    if: needs.licence.outputs.present == 'true' && vars.RUN_UNITY_TESTS == 'true'
     steps:
       - uses: actions/checkout@v4
 
