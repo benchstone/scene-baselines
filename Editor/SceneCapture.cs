@@ -110,6 +110,25 @@ namespace SceneBaselines
             return string.Join("/", parts);
         }
 
+        /// <summary>An object's place in the hierarchy, as a chain of sibling indices that sorts.</summary>
+        /// <remarks>
+        /// Only used to order same-named siblings. They share a hierarchy path by definition, so the
+        /// path cannot separate them and something else has to, or their order — and with it the
+        /// "#n" suffix each one gets — falls back to whatever order the scene sweep happened to
+        /// return.
+        ///
+        /// Indices are zero-padded because these are compared as text, where "10" sorts before "2".
+        /// </remarks>
+        private static string SiblingIndexChain(Transform t)
+        {
+            var parts = new List<string>();
+            for (Transform cur = t; cur != null; cur = cur.parent)
+                parts.Add(cur.GetSiblingIndex()
+                             .ToString("D6", System.Globalization.CultureInfo.InvariantCulture));
+            parts.Reverse();
+            return string.Join("/", parts);
+        }
+
         // A RectTransform carries the whole meaning of a UI element's placement, and none of it
         // shows up in pos/rot/scale — which is why "anchored to the top-right corner" came back
         // `unverifiable`: the judge had no field to read it from. Emitted only when the transform
@@ -160,41 +179,12 @@ namespace SceneBaselines
         {
             var snapshot = new SceneSnapshot();
             var seen = new Dictionary<string, int>();
-            Scene activeScene = SceneManager.GetActiveScene();
 
             // Collected first, then described, so identities can be fetched for the whole scene in
             // ONE call. GlobalObjectId's per-object overload is named "Slow" for a reason and capture
             // already walks every object in the scene; paying that cost per object would make a check
             // slow enough to stop being run, which costs more coverage than it adds.
-            var objects = new List<GameObject>();
-
-            // FindObjectsInactive.Include is load-bearing. The default overload returns only ACTIVE
-            // objects, which left two holes: deactivating an object made it vanish from the record
-            // and get reported as "not in the scene now", which is false — it is still there; and,
-            // far worse, anything already inactive when a baseline was recorded was never covered
-            // at all. Real projects are full of those — disabled level sections, closed UI panels,
-            // pooled enemies, alternate spawn sets — and every one was a place changes went
-            // unnoticed while the report said PASS.
-            foreach (GameObject go in GameObject.FindObjectsByType<GameObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None))
-            {
-                if (go == null || !go.scene.IsValid())
-                    continue;
-
-                // One baseline describes ONE scene. FindObjectsByType sweeps every LOADED scene,
-                // so on an additive setup a baseline for Level_01 silently swallowed the objects
-                // of every other open scene — and the next check, run with a different set loaded,
-                // reported all of them MISSING. A wall of red for a scene nobody touched, which is
-                // the failure that gets a check switched off for good.
-                //
-                // Filtering here rather than merging scenes keeps a baseline portable: it matches
-                // its own scenePath, and a second scene is covered by its own baseline instead of
-                // being smuggled into this one.
-                if (go.scene != activeScene)
-                    continue;
-
-                objects.Add(go);
-            }
+            List<GameObject> objects = SweepActiveSceneObjects();
 
             List<string> ids = CaptureObjectIds(objects);
 
@@ -203,10 +193,14 @@ namespace SceneBaselines
                 GameObject go = objects[i];
                 string path = GetHierarchyPath(go.transform);
 
-                // Same-named siblings still collide on path, and the "#n" suffix is still assigned by
-                // capture order, so the DISPLAY name of a twin can move between captures. The pairing
-                // no longer depends on it: identity now comes from the id below, so twins match each
-                // other correctly even when their suffixes swap.
+                // Same-named siblings still collide on path, so one of them takes a "#n" suffix. It is
+                // assigned walking the list in the order the sweep fixed — by hierarchy path, then by
+                // sibling index — so the same twin keeps the same suffix across captures. It used to
+                // follow the raw sweep, which meant the DISPLAY name of a twin could move between two
+                // captures of an unchanged scene.
+                //
+                // The pairing does not rest on it either way: identity comes from the id below, so
+                // twins match each other correctly even where a suffix does move.
                 if (seen.TryGetValue(path, out int count))
                 {
                     seen[path] = count + 1;
@@ -229,6 +223,74 @@ namespace SceneBaselines
         }
 
         /// <summary>
+        /// Every GameObject in the active scene, inactive included, in a stable, repeatable order.
+        /// </summary>
+        /// <remarks>
+        /// ONE method, because two callers have to agree exactly: capture assigns the "#n" suffixes
+        /// walking this list, and <see cref="FindByRecordedPath"/> re-derives them to resolve one. Two
+        /// separate sweeps could disagree about which twin is "#2" and quietly hand back the wrong
+        /// object — which looks like it worked, and is worse than returning nothing.
+        ///
+        /// <para>FindObjectsInactive.Include is load-bearing. The default overload returns only ACTIVE
+        /// objects, which left two holes: deactivating an object made it vanish from the record and
+        /// get reported as "not in the scene now", which is false — it is still there; and, far worse,
+        /// anything already inactive when a baseline was recorded was never covered at all. Real
+        /// projects are full of those — disabled level sections, closed UI panels, pooled enemies,
+        /// alternate spawn sets — and every one was a place changes went unnoticed while the report
+        /// said PASS.</para>
+        ///
+        /// <para>One baseline describes ONE scene. FindObjectsByType sweeps every LOADED scene, so on
+        /// an additive setup a baseline for Level_01 silently swallowed the objects of every other open
+        /// scene — and the next check, run with a different set loaded, reported all of them MISSING. A
+        /// wall of red for a scene nobody touched, which is the failure that gets a check switched off
+        /// for good. Filtering here rather than merging scenes keeps a baseline portable: it matches
+        /// its own scenePath, and a second scene is covered by its own baseline instead of being
+        /// smuggled into this one.</para>
+        ///
+        /// <para>🚨 The sort is not tidiness. FindObjectsSortMode.None is documented as unspecified and
+        /// behaves like it: closing and reopening an unmodified scene returns the same objects in a
+        /// different order, so the same scene on the same machine produced byte-different baselines.
+        /// Nothing was ever mis-REPORTED by that — objects match by identity and then by path, and root
+        /// order is read from GetRootGameObjects — so a check stayed correct. The cost was to the FILE.
+        /// A baseline is committed JSON, so a scrambled array meant a large diff for a scene nobody had
+        /// touched, and two branches that both re-recorded conflicted over changes neither had made. In
+        /// a tool whose whole claim is a legible diff, that is the wrong artifact to hand a team.</para>
+        ///
+        /// <para>Path first, so a diff moves only what was renamed and a hierarchy reorder — already
+        /// reported by rootOrder and childOrder — does not churn the file as well. Sibling index breaks
+        /// the tie for same-named siblings, which share a path by definition.</para>
+        /// </remarks>
+        private static List<GameObject> SweepActiveSceneObjects()
+        {
+            Scene activeScene = SceneManager.GetActiveScene();
+
+            // Keys are built once rather than inside the comparison: sorting calls a comparer
+            // O(n log n) times, and rebuilding a hierarchy path per call would put a walk up the tree,
+            // allocating a string at every level, on that multiplier for every object in the scene.
+            var ordered = new List<KeyValuePair<string, GameObject>>();
+
+            foreach (GameObject go in GameObject.FindObjectsByType<GameObject>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None))
+            {
+                if (go == null || !go.scene.IsValid() || go.scene != activeScene)
+                    continue;
+
+                // \0 separates the two keys and sorts below every character a name can contain, so
+                // comparing the joined string is the same as comparing path first, then sibling index.
+                ordered.Add(new KeyValuePair<string, GameObject>(
+                    GetHierarchyPath(go.transform) + "\0" + SiblingIndexChain(go.transform), go));
+            }
+
+            ordered.Sort((x, y) => string.CompareOrdinal(x.Key, y.Key));
+
+            var objects = new List<GameObject>(ordered.Count);
+            foreach (KeyValuePair<string, GameObject> entry in ordered)
+                objects.Add(entry.Value);
+
+            return objects;
+        }
+
+        /// <summary>
         /// The live GameObject a recorded path refers to, or null when nothing matches.
         /// </summary>
         /// <remarks>
@@ -236,6 +298,10 @@ namespace SceneBaselines
         /// than parsing the string and walking by name. Parsing would have to re-derive the suffix
         /// rule, and any drift between the two would quietly select the wrong twin — worse than
         /// selecting nothing, because it looks like it worked.
+        ///
+        /// "The same sweep" is now literal: both walk <see cref="SweepActiveSceneObjects"/>, so they
+        /// cannot disagree about which twin is "#2" even in principle. They used to be two copies of
+        /// the same loop over an order Unity does not guarantee.
         ///
         /// Only for baselines with no usable identity: an id resolves exactly and needs none of this.
         /// </remarks>
@@ -245,14 +311,9 @@ namespace SceneBaselines
                 return null;
 
             var seen = new Dictionary<string, int>();
-            Scene activeScene = SceneManager.GetActiveScene();
 
-            foreach (GameObject go in GameObject.FindObjectsByType<GameObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None))
+            foreach (GameObject go in SweepActiveSceneObjects())
             {
-                if (go == null || !go.scene.IsValid() || go.scene != activeScene)
-                    continue;
-
                 string path = GetHierarchyPath(go.transform);
 
                 if (seen.TryGetValue(path, out int count))
@@ -889,11 +950,12 @@ namespace SceneBaselines
             // Active scene only, for the same reason the object sweep is: assets reached through
             // another loaded scene are that scene's dependencies, and recording them here would
             // make this baseline report changes to material it does not own.
-            Scene activeScene = SceneManager.GetActiveScene();
-            GameObject[] roots = GameObject.FindObjectsByType<GameObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None)
-                .Where(go => go != null && go.scene == activeScene)
-                .ToArray();
+            //
+            // The same sweep the objects use, so what is fed to CollectDependencies is in a fixed
+            // order too. The recorded list is sorted by path further down and would come out stable
+            // either way — this is about not leaving an unspecified order in the middle of a capture
+            // whose whole job is to be repeatable.
+            GameObject[] roots = SweepActiveSceneObjects().ToArray();
 
             UnityEngine.Object[] dependencies;
             try

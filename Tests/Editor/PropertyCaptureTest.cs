@@ -63,8 +63,8 @@ namespace SceneBaselines
         [Test, Order(7)] public void Settings_are_covered() => Verify(CheckSettingsAreCovered);
         [Test, Order(8)] public void Only_the_active_scene_is_captured()
         {
-            RequiresASavedSceneOpen();
-            Verify(CheckOnlyTheActiveSceneIsCaptured);
+            RefuseToRunOverUnsavedWork();
+            Verify(() => InASavedScene(CheckOnlyTheActiveSceneIsCaptured));
         }
 
         [Test, Order(9)] public void Child_order_is_covered() => Verify(CheckChildOrderIsCovered);
@@ -75,42 +75,161 @@ namespace SceneBaselines
         [Test, Order(14)] public void Order_change_names_what_moved() => Verify(CheckOrderChangeNamesWhatMoved);
         [Test, Order(15)] public void Root_order_is_covered()
         {
-            RequiresASavedSceneOpen();
-            Verify(CheckRootOrderIsCovered);
+            RefuseToRunOverUnsavedWork();
+            Verify(() => InASavedScene(CheckRootOrderIsCovered));
         }
 
         [Test, Order(16)] public void Additions_speak_only_when_suspicious() => Verify(CheckAdditionsSpeakOnlyWhenSuspicious);
         [Test, Order(17)] public void Dedup_covers_every_section() => Verify(CheckDedupCoversEverySection);
 
-        /// <summary>
-        /// Skips the calling test, with the reason, unless a saved scene is open.
-        /// </summary>
-        /// <remarks>
-        /// Two groups read or add to the scene the editor has open, so they need a real one: the
-        /// additive-scene group cannot even start against an untitled scene, because Unity refuses
-        /// to add a scene alongside one that has never been saved.
-        ///
-        /// Running from the menu that holds, since the user has a scene open. Under the Test
-        /// Runner it does not — it swaps in a fresh untitled scene for the run — so these two are
-        /// reported as SKIPPED with the reason instead of failing, which would be a false alarm
-        /// about the product rather than a fact about the environment. The menu entry point still
-        /// exercises them fully.
-        ///
-        /// Better than either would be for the groups to open a scene of their own and put back
-        /// what they found. That is worth doing, and would let CI cover these two as well.
-        /// </remarks>
-        private static void RequiresASavedSceneOpen()
+        [Test, Order(18)] public void Capture_is_stable_across_a_scene_reopen()
         {
-            Scene active = SceneManager.GetActiveScene();
-            if (active.IsValid() && !string.IsNullOrEmpty(active.path) && !active.isDirty)
+            RefuseToRunOverUnsavedWork();
+            Verify(() => InASavedScene(CheckCaptureIsStableAcrossReopen));
+        }
+
+        [Test, Order(19)] public void Capture_does_not_depend_on_locale() => Verify(CheckCaptureDoesNotDependOnLocale);
+
+        // ── A scene of the suite's own ───────────────────────────────────────────
+        //
+        // Three groups need a real, SAVED scene. The additive-scene group cannot even start without
+        // one, because Unity refuses to add a scene alongside one that has never been saved; the
+        // root-order group has nothing to describe in an empty scene; and the reopen group has
+        // nothing to reopen.
+        //
+        // That used to mean they were SKIPPED under the Test Runner, which opens a fresh untitled
+        // scene for the run — so the menu covered them and CI did not. Three of nineteen groups, and
+        // among them the one guarding the determinism defect found on 2026-09-01, which is exactly
+        // the property CI exists to hold. A test that only runs when a human remembers to click a
+        // menu is not a guarantee.
+        //
+        // So the groups now bring their own scene when there isn't one. Two rules make that safe:
+        //
+        //   1. A real open scene is PREFERRED. Interactively the user has one, and the project's own
+        //      scene is a better subject than anything synthetic — it is the scene whose reopen
+        //      exposed the sweep-order bug. The fixture is the fallback, not the default, so this
+        //      change adds CI coverage without weakening what the menu already covered.
+        //
+        //   2. Unsaved work is never touched. Every path here opens or reloads scenes, so if
+        //      anything in the editor is dirty the group refuses rather than risk discarding it.
+        //      Under the Test Runner nothing is dirty, so CI always proceeds.
+        //
+        // The fixture is deleted and the editor's original scene setup restored in a finally, so a
+        // failing assertion cannot leave a stray scene asset behind in a user's project.
+
+        private const string FixtureFolderName = "SceneBaselinesTestFixture";
+        private const string FixtureFolder = "Assets/" + FixtureFolderName;
+        private const string FixtureScenePath = FixtureFolder + "/CaptureFixture.unity";
+
+        /// <summary>Skips the calling test when anything in the editor has unsaved changes.</summary>
+        private static void RefuseToRunOverUnsavedWork()
+        {
+            if (!EditorHasUnsavedWork(out string why))
                 return;
 
-            Assert.Ignore(
-                "Needs a saved scene open, and the active scene is " +
-                (string.IsNullOrEmpty(active.path) ? "untitled" : $"'{active.path}'") +
-                (active.isDirty ? " with unsaved changes" : "") +
-                ". The Test Runner opens an untitled scene for the run; use the menu entry " +
-                "'Scene Baselines/Tests/Property Capture (free)' to cover this group.");
+            Assert.Ignore(why + " These groups open and reload scenes, so they will not run while " +
+                          "there is unsaved work to lose. Save, then run them again.");
+        }
+
+        private static bool EditorHasUnsavedWork(out string why)
+        {
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (!scene.isDirty)
+                    continue;
+
+                why = "The scene " +
+                      (string.IsNullOrEmpty(scene.path) ? "(untitled)" : $"'{scene.path}'") +
+                      " has unsaved changes.";
+                return true;
+            }
+
+            why = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Runs a group against a saved scene: the one already open, or a temporary one built for it.
+        /// </summary>
+        private static int InASavedScene(System.Func<int> group)
+        {
+            if (EditorHasUnsavedWork(out string why))
+            {
+                Debug.Log("[Scene Baselines] SKIPPED: " + why + " Groups that need a saved scene do " +
+                          "not run while there is unsaved work to lose.");
+                return 0;
+            }
+
+            Scene active = SceneManager.GetActiveScene();
+
+            // A real scene beats a synthetic one, so use it when the editor already has one open.
+            if (active.IsValid() && !string.IsNullOrEmpty(active.path))
+                return group();
+
+            return InAFixtureScene(group);
+        }
+
+        private static int InAFixtureScene(System.Func<int> group)
+        {
+            SceneSetup[] toRestore = EditorSceneManager.GetSceneManagerSetup();
+
+            if (!AssetDatabase.IsValidFolder(FixtureFolder))
+                AssetDatabase.CreateFolder("Assets", FixtureFolderName);
+
+            Scene fixture = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
+            // Deliberately NOT in alphabetical order. Root order is recorded as hierarchy order, and
+            // a fixture whose creation order matched its sorted order could not tell the two apart —
+            // which matters now that the object sweep itself sorts.
+            new GameObject("Zone");
+            new GameObject("Anchor");
+            new GameObject("Marker");
+
+            if (!EditorSceneManager.SaveScene(fixture, FixtureScenePath))
+            {
+                Debug.Log("[Scene Baselines] SKIPPED: could not save a temporary scene at " +
+                          FixtureScenePath + ", so this group has no saved scene to run against.");
+                RestoreSceneSetup(toRestore);
+                return 0;
+            }
+
+            try
+            {
+                return group();
+            }
+            finally
+            {
+                // Restored BEFORE the asset is deleted: Unity will not delete a scene that is open.
+                RestoreSceneSetup(toRestore);
+                AssetDatabase.DeleteAsset(FixtureScenePath);
+                AssetDatabase.DeleteAsset(FixtureFolder);
+            }
+        }
+
+        private static void RestoreSceneSetup(SceneSetup[] toRestore)
+        {
+            // An untitled scene has no path, and RestoreSceneManagerSetup cannot reopen one — the
+            // Test Runner's own scene is exactly that. A fresh empty scene is the honest equivalent
+            // of what was found, and is what the runner would have had anyway.
+            bool restorable = toRestore != null && toRestore.Length > 0;
+
+            if (restorable)
+            {
+                foreach (SceneSetup setup in toRestore)
+                {
+                    if (!string.IsNullOrEmpty(setup.path))
+                        continue;
+
+                    restorable = false;
+                    break;
+                }
+            }
+
+            if (restorable)
+                EditorSceneManager.RestoreSceneManagerSetup(toRestore);
+            else
+                EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         }
 
         /// <summary>
@@ -159,16 +278,18 @@ namespace SceneBaselines
                 failures += CheckInactiveObjectsAreCovered(created);
                 failures += CheckAssetContentsAreCovered();
                 failures += CheckSettingsAreCovered();
-                failures += CheckOnlyTheActiveSceneIsCaptured();
+                failures += InASavedScene(CheckOnlyTheActiveSceneIsCaptured);
                 failures += CheckChildOrderIsCovered(created);
                 failures += CheckIdentityMatching();
                 failures += CheckCaptureProducesIdentities();
                 failures += CheckAcceptRewritesOnlyWhatWasChosen();
                 failures += CheckOrderComparesAsSubsequence();
                 failures += CheckOrderChangeNamesWhatMoved();
-                failures += CheckRootOrderIsCovered();
+                failures += InASavedScene(CheckRootOrderIsCovered);
                 failures += CheckAdditionsSpeakOnlyWhenSuspicious();
                 failures += CheckDedupCoversEverySection();
+                failures += InASavedScene(CheckCaptureIsStableAcrossReopen);
+                failures += CheckCaptureDoesNotDependOnLocale();
             }
             finally
             {
@@ -1314,6 +1435,137 @@ namespace SceneBaselines
             };
 
             return RegressionCheck.Compare(baseline, live, scenePersistedAfterCapture: true);
+        }
+
+        // ── Is a capture repeatable? ─────────────────────────────────────────────
+        //
+        // This product is bought for what it says at a MERGE, which means two machines must describe
+        // one unchanged scene the same way. Everything else here asks whether a capture is right;
+        // these two ask whether it is the SAME right answer twice, which is a separate property and
+        // was not covered by a single assertion until 2026-09-01.
+        //
+        // Both guard defects that were measured on this project, not imagined:
+        //
+        //   reopen — the scene sweep used FindObjectsSortMode.None, which Unity documents as
+        //     unspecified and which really does vary: closing and reopening an untouched Level_01
+        //     returned its five objects in a different order, so the same scene on the same machine
+        //     serialised to a different baseline. No finding was ever wrong (objects match on
+        //     identity, then path; root order is read from GetRootGameObjects) — the damage was a
+        //     committed JSON file that churned for a scene nobody had edited, and two branches that
+        //     conflicted over changes neither had made.
+        //
+        //   locale — floats are formatted through InvariantCulture, so a developer on a comma-decimal
+        //     machine should not produce "0,5" and diff against the whole team. That held when it was
+        //     first measured. It is asserted here because it is the kind of property that is true
+        //     until someone adds one field with a bare ToString(), and then silently is not.
+        //
+        // Neither test writes a baseline, creates an object, or leaves the editor changed.
+
+        /// <summary>
+        /// Everything a baseline would record, flattened into one comparable string.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately the same three calls a real recording makes, rather than a convenient subset:
+        /// a determinism test that only looked at objects would have passed while settings or assets
+        /// drifted underneath it.
+        /// </remarks>
+        private static string CanonicalCapture()
+        {
+            var sb = new System.Text.StringBuilder();
+
+            foreach (BaselineObjectRecord record in SceneCapture.CaptureBaselineObjects())
+                sb.Append("obj|").Append(record.path).Append('|')
+                  .Append(record.state).Append('|').Append(record.id).Append('\n');
+
+            foreach (SceneCapture.SceneAssetRecord asset in SceneCapture.CaptureReferencedAssets().assets)
+                sb.Append("asset|").Append(asset.path).Append('|')
+                  .Append(asset.type).Append('|').Append(asset.state).Append('\n');
+
+            foreach (SceneCapture.SceneSettingsRecord setting in SceneCapture.CaptureSettings())
+                sb.Append("setting|").Append(setting.scope).Append('|')
+                  .Append(setting.group).Append('|').Append(setting.state).Append('\n');
+
+            return sb.ToString();
+        }
+
+        private static int CheckCaptureIsStableAcrossReopen()
+        {
+            Scene active = SceneManager.GetActiveScene();
+
+            // Reopening is the whole method, so this cannot run against an untitled scene, and must
+            // never run against unsaved work — reopening would silently discard it.
+            if (!active.IsValid() || string.IsNullOrEmpty(active.path) || active.isDirty)
+            {
+                Debug.Log("[Scene Baselines] SKIPPED: capture stability across a reopen — needs a " +
+                          "saved scene with no unsaved changes, because it reloads the scene.");
+                return 0;
+            }
+
+            int failures = 0;
+            string scenePath = active.path;
+
+            string first = CanonicalCapture();
+
+            // A reopen, rather than two captures in a row. In-session the sweep returns a stable
+            // order even when the order is not guaranteed, so back-to-back captures agreed while the
+            // real defect was still there — the reopen is what a second machine actually does.
+            EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+
+            string second = CanonicalCapture();
+
+            failures += Held("a capture of an unchanged scene is byte-identical after reopening it",
+                first == second);
+
+            // The property a user would state: reopening a scene is not a change, so it must not read
+            // as one. Only meaningful where the scene actually has baselines to compare against.
+            RegressionRunResult reopened = RegressionCheck.RunForActiveScene();
+            if (reopened.comparisons.Count > 0)
+            {
+                failures += Held("reopening an unchanged scene produces no findings",
+                    reopened.comparisons.Sum(comparison => comparison.findings.Count) == 0);
+            }
+
+            return failures;
+        }
+
+        private static int CheckCaptureDoesNotDependOnLocale()
+        {
+            int failures = 0;
+
+            System.Threading.Thread thread = System.Threading.Thread.CurrentThread;
+            System.Globalization.CultureInfo originalCulture = thread.CurrentCulture;
+            System.Globalization.CultureInfo originalUICulture = thread.CurrentUICulture;
+
+            string asFound = CanonicalCapture();
+
+            try
+            {
+                // de-DE for the decimal comma, tr-TR because it also swaps the casing of "i" — the
+                // two ways a machine's locale usually reaches code that never asked for one.
+                foreach (string cultureName in new[] { "de-DE", "tr-TR" })
+                {
+                    var culture = new System.Globalization.CultureInfo(cultureName);
+                    thread.CurrentCulture = culture;
+                    thread.CurrentUICulture = culture;
+
+                    // Without this the test can pass for the wrong reason: if the culture never took
+                    // effect, the capture below is trivially identical and asserts nothing at all.
+                    failures += Held($"{cultureName} is really in force, so the next check means something",
+                        (0.5f).ToString() == "0,5");
+
+                    failures += Held($"a capture is byte-identical under {cultureName}",
+                        CanonicalCapture() == asFound);
+                }
+            }
+            finally
+            {
+                // In a finally because leaving the editor in a foreign culture would be a far worse
+                // bug than the one under test, and would outlive this run.
+                thread.CurrentCulture = originalCulture;
+                thread.CurrentUICulture = originalUICulture;
+            }
+
+            return failures;
         }
 
         private static string Capture(GameObject go) => SceneCapture.DescribeObjectState(go);
