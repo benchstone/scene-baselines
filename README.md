@@ -90,10 +90,20 @@ Read them with `git diff --word-diff`; the state is one long line per object.
 **Window ▸ General ▸ Test Runner ▸ EditMode.** The suite runs against throwaway objects — no
 Play Mode, no scene of yours is touched, nothing is written.
 
-Two of the seventeen groups need a saved scene open, and the Test Runner opens an untitled one
-for the duration of a run, so they report as **skipped with the reason**. The menu entry
-**Scene Baselines ▸ Tests ▸ Property Capture (free)** runs all seventeen against whatever scene
-you have open, and is the one to use before trusting a release.
+Nineteen groups, and all nineteen run — in the Test Runner and in CI alike. Three of them need a
+saved scene to work on. Rather than skip, they use the scene you already have open, and otherwise
+create a temporary one and put your scene setup back afterwards. If anything in the editor has
+unsaved changes they refuse to run at all, rather than risk discarding it.
+
+The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same nineteen against
+whatever scene you have open.
+
+### In CI
+
+The workflow activates Unity from an account, using the repository secrets `UNITY_EMAIL` and
+`UNITY_PASSWORD`. There is no licence *file* to hold: Unity 6 issues an entitlement licence rather
+than the legacy `.ulf`, and Unity has discontinued manual activation of Personal licences. Without
+both secrets the test job reports a clean skip rather than a red X, so a fork's CI stays green.
 
 For tests to appear at all, the project's `Packages/manifest.json` needs this package listed as
 testable:

@@ -67,8 +67,13 @@ jobs:
           fi
           echo "no network calls in Editor/"
 
-  # Needs a Unity licence, which only the repo owner can add. Gated on the secret so
-  # a fork, or this repo before the secret exists, reports a clean skip and not a red X.
+  # Needs Unity credentials, which only the repo owner can add. Gated on them so a fork,
+  # or this repo before they exist, reports a clean skip and not a red X.
+  #
+  # It checks the CREDENTIALS, not a licence file. Unity 6 issues an entitlement licence
+  # rather than the legacy .ulf, and Unity has discontinued manual activation of Personal
+  # licences, so there is no .ulf to hold any more — activation is done from the account
+  # itself. See README, "Running the tests".
   licence:
     name: Unity licence available?
     runs-on: ubuntu-latest
@@ -77,13 +82,18 @@ jobs:
     steps:
       - id: check
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         run: |
-          if [ -n "$UNITY_LICENSE" ]; then
+          if [ -n "$UNITY_EMAIL" ] && [ -n "$UNITY_PASSWORD" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::UNITY_LICENSE is not set, so the EditMode tests are skipped. See README, 'Running the tests'."
+            # Named individually: "one of them is missing" is the failure that cost an
+            # evening, and a gate that cannot say WHICH is a gate that has to be guessed at.
+            [ -n "$UNITY_EMAIL" ]    || echo "::notice::UNITY_EMAIL is not set."
+            [ -n "$UNITY_PASSWORD" ] || echo "::notice::UNITY_PASSWORD is not set."
+            echo "::notice::EditMode tests are skipped without both. See README, 'Running the tests'."
           fi
 
   tests:
@@ -103,17 +113,33 @@ jobs:
           key: Library-${{ hashFiles('CI~/TestProject/Packages/manifest.json') }}
           restore-keys: Library-
 
-      - uses: game-ci/unity-test-runner@v4
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      # Installs the exact editor the test project asks for, read from its ProjectVersion.txt
+      # so the version can never drift from the project it is meant to test.
+      - uses: RageAgainstThePixel/unity-setup@v2
         with:
-          projectPath: CI~/TestProject
-          testMode: editmode
-          artifactsPath: test-results
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          checkName: EditMode test results
+          version-file: 'CI~/TestProject/ProjectSettings/ProjectVersion.txt'
+          cache-installation: true
+
+      # Activates from the ACCOUNT, not from a licence file. This is the whole reason the
+      # workflow moved off game-ci/unity-test-runner: that action requires UNITY_LICENSE to
+      # hold a legacy .ulf, and on Unity 6 no such file is produced and Unity will no longer
+      # mint one for a Personal licence.
+      - uses: RageAgainstThePixel/activate-unity-license@v2
+        with:
+          license: 'Personal'
+          username: ${{ secrets.UNITY_EMAIL }}
+          password: ${{ secrets.UNITY_PASSWORD }}
+
+      - name: Somewhere to put the results
+        run: mkdir -p test-results
+
+      # No -quit: Unity's own docs say not to combine it with -runTests, because the editor
+      # can exit before the run finishes and report success for tests that never ran.
+      - uses: RageAgainstThePixel/unity-action@v3
+        with:
+          project-path: 'CI~/TestProject'
+          log-name: 'EditMode-Tests'
+          args: '-batchmode -runTests -testPlatform EditMode -testResults ${{ github.workspace }}/test-results/results.xml'
 
       - uses: actions/upload-artifact@v4
         if: always()
