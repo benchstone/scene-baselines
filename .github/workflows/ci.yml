@@ -115,9 +115,16 @@ jobs:
 
       # Installs the exact editor the test project asks for, read from its ProjectVersion.txt
       # so the version can never drift from the project it is meant to test.
+      #
+      # The Hub version is pinned because Unity Hub 3.15.0's .deb is broken: it does not create
+      # /opt/unityhub/unityhub, so installing it on a fresh Linux runner fails with ENOENT before
+      # any Unity work begins. A runner starts with no Hub and would otherwise take the latest,
+      # which is the broken one. Setting hub-version also disables the auto-update that would
+      # reintroduce it. Revisit once Unity ships a fixed package.
       - uses: RageAgainstThePixel/unity-setup@v2
         with:
           version-file: 'CI~/TestProject/ProjectSettings/ProjectVersion.txt'
+          hub-version: '3.14.3'
           cache-installation: true
 
       # Activates from the ACCOUNT, not from a licence file. This is the whole reason the
