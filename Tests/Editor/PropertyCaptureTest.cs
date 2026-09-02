@@ -453,10 +453,15 @@ namespace SceneBaselines
             // Object IDs are regenerated on every domain reload. One recorded in a baseline would
             // make the next script compile look like a scene-wide regression.
             failures += Held("no object ID is recorded",
-                // GetInstanceID rather than GetEntityId: the latter only exists on very recent
-                // Unity 6 editors, and this assertion only needs SOME id that the capture must
-                // never contain. GetInstanceID exists on every supported version.
+                // Each editor rejects the other's spelling, so this needs the define: GetEntityId
+                // arrived in 6000.4, and from that version GetInstanceID is obsolete AS AN ERROR
+                // (CS0619), not merely deprecated. Either name serves here -- the assertion only
+                // needs some id that the capture must never contain.
+#if UNITY_6000_4_OR_NEWER
+                !state.Contains(target.GetEntityId().ToString()));
+#else
                 !state.Contains(target.GetInstanceID().ToString()));
+#endif
             failures += Held("a reference is recorded by name", state.Contains("Target"));
 
             // Truncation must announce itself. A record that quietly covers less than it appears to
