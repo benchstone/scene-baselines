@@ -140,6 +140,25 @@ jobs:
           key: Library-${{ matrix.slug }}-${{ hashFiles(format('{0}/Packages/manifest.json', matrix.project)) }}
           restore-keys: Library-${{ matrix.slug }}-
 
+      # Unity 2021.3 bundles a .NET runtime that links against libssl 1.1, and current Ubuntu
+      # runners ship OpenSSL 3 only. Without this the Roslyn compiler process dies with
+      # "No usable version of libssl was found / Aborted (core dumped)", and Unity then reports
+      # "Scripts have compiler errors" -- which is a lie: csc never ran at all. Cost an entirely
+      # wasted debugging pass once, so it is spelled out here.
+      - name: libssl 1.1, which Unity 2021.3's bundled dotnet needs
+        if: matrix.slug == '2021'
+        run: |
+          set -e
+          if ! sudo apt-get install -y libssl1.1 2>/dev/null; then
+            url=http://security.ubuntu.com/ubuntu/pool/main/o/openssl/
+            deb=$(curl -sS "$url" | grep -o 'libssl1\.1_1\.1\.1f-1ubuntu2[^"]*_amd64\.deb' | sort -V | tail -1)
+            [ -n "$deb" ] || { echo "::error::no libssl1.1 .deb found at $url"; exit 1; }
+            echo "installing $deb"
+            curl -fsSLO "$url$deb"
+            sudo dpkg -i "$deb"
+          fi
+          openssl version || true
+
       # Installs the exact editor each project asks for, read from its ProjectVersion.txt
       # so the version can never drift from the project it is meant to test.
       #
