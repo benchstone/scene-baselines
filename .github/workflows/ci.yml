@@ -96,25 +96,23 @@ jobs:
             echo "::notice::EditMode tests are skipped without both. See README, 'Running the tests'."
           fi
 
-  # ⚠️ OFF until Unity licence activation works headlessly. Everything in this job is correct and
-  # proven as far as it goes: the editor installs, and the credentials reach it. What fails is the
-  # activation itself, with "License command failed with exit code 26: Unknown Error" — an exit code
-  # Unity does not document. Unity's own manual says the command-line licensing procedures do not
-  # apply to Personal licences and that Personal must be activated by logging into the Hub, so this
-  # may not be solvable from configuration at all.
+  # Runs the suite on a real editor, headless. Two things had to be true before this could work,
+  # and both were misread as "Unity does not support Personal licences in CI":
   #
-  # It is disabled rather than deleted so re-enabling is one switch, not a rewrite: set the
-  # repository variable RUN_UNITY_TESTS to 'true'.
+  #   1. The account must have a Unity-NATIVE password. An account created through Google sign-in has
+  #      none, so every activation returns "Invalid Credential 143.002" and the licensing client wraps
+  #      it as the undocumented "exit code 26: Unknown Error". The code says nothing; the line above
+  #      it does. Set a password under Unity ID > Security, and keep 2FA off for this CI-only account.
+  #   2. CI~/TestProject must contain an Assets folder. Unity aborts with "Couldn't set project path"
+  #      before it initialises the engine if one is missing, and git cannot store an empty directory --
+  #      hence the committed placeholder inside it.
   #
-  # 🚨 Being honest about the consequence: CI checks the package's structure and NOT its behaviour.
-  # The nineteen EditMode tests run locally — Test Runner, or Scene Baselines ▸ Tests ▸ Property
-  # Capture (free) — and a green badge here does not claim otherwise. Said plainly in the README too,
-  # because a badge that implies more than it checks is worse than no badge.
+  # Gated on the credentials only. A fork cannot read them, so it reports a clean skip, not a red X.
   tests:
     name: EditMode tests
     runs-on: ubuntu-latest
     needs: [package, licence]
-    if: needs.licence.outputs.present == 'true' && vars.RUN_UNITY_TESTS == 'true'
+    if: needs.licence.outputs.present == 'true'
     steps:
       - uses: actions/checkout@v4
 

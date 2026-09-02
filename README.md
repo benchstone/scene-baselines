@@ -98,22 +98,20 @@ unsaved changes they refuse to run at all, rather than risk discarding it.
 The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same nineteen against
 whatever scene you have open.
 
-### What CI does and does not check
+### What CI checks
 
-**CI checks the package's structure, not its behaviour.** Every `.cs` and folder has a `.meta`, no
-`.meta` is orphaned, `package.json` agrees with the changelog, and `Editor/` makes no network calls —
-that last one guards a claim this README makes. A green badge means those four things passed.
+**Structure and behaviour, both.** On every push and pull request GitHub Actions checks that every
+`.cs` and folder has a `.meta`, that no `.meta` is orphaned, that `package.json` agrees with the
+changelog, and that `Editor/` makes no network calls — that last one guards a claim this README makes.
 
-**The nineteen EditMode tests are not part of that**, and the badge does not claim they are. They run
-locally, from the Test Runner or the menu entry above, and are the check to trust before a release.
+**Then it runs all nineteen EditMode tests on a real Unity 6000.5.1f1 editor**, headless on Linux,
+against the minimal project in `CI~/TestProject` which installs this package by relative path. A green
+badge means the structure checks and the nineteen tests all passed, on hardware that is not the
+author's.
 
-The reason is Unity's, not this package's: running the editor in CI needs an activated licence, and on
-a **Personal** licence there is currently no working headless activation. Unity 6 issues an entitlement
-licence instead of the legacy `.ulf` file that CI actions expect, Unity has discontinued manual
-activation of Personal licences, and the command-line licensing route is documented as not applying to
-Personal at all. The workflow to do it is written and kept in `.github/workflows/ci.yml` — the editor
-installs and the credentials reach it; only activation fails. It is switched off behind the repository
-variable `RUN_UNITY_TESTS`, ready for the day that changes or a Pro licence is available.
+One honest caveat: a fork cannot see the repository's Unity credentials, and GitHub does not pass
+secrets to workflows from forks. On a fork the Unity job reports a clean skip rather than a red X, so
+a badge there covers structure only.
 
 For tests to appear at all, the project's `Packages/manifest.json` needs this package listed as
 testable:
