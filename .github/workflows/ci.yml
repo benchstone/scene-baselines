@@ -109,40 +109,52 @@ jobs:
   #
   # Gated on the credentials only. A fork cannot read them, so it reports a clean skip, not a red X.
   tests:
-    name: EditMode tests
+    name: EditMode tests (${{ matrix.name }})
     runs-on: ubuntu-latest
     needs: [package, licence]
     if: needs.licence.outputs.present == 'true'
+    strategy:
+      # Both versions always report. If only one breaks, the other's result is the
+      # information that says whether the cause is version-specific.
+      fail-fast: false
+      matrix:
+        include:
+          # The floor package.json advertises. It is here because a claimed version that
+          # nothing runs is exactly the unverified claim this repo removed from its README:
+          # the package did NOT compile on 2021.3 until 2026-09-02, while claiming to.
+          - name: "2021.3 LTS"
+            slug: "2021"
+            project: "CI~/TestProject2021"
+          - name: "Unity 6"
+            slug: "unity6"
+            project: "CI~/TestProject"
     steps:
       - uses: actions/checkout@v4
 
-      # The repo is a package, not a project. CI~/TestProject is a minimal project that
-      # installs it by relative path; the trailing ~ keeps Unity from importing it when
+      # The repo is a package, not a project. Each matrix entry has a minimal project that
+      # installs it by relative path; the trailing ~ keeps Unity from importing them when
       # somebody installs this package for real.
       - uses: actions/cache@v4
         with:
-          path: CI~/TestProject/Library
-          key: Library-${{ hashFiles('CI~/TestProject/Packages/manifest.json') }}
-          restore-keys: Library-
+          path: ${{ matrix.project }}/Library
+          key: Library-${{ matrix.slug }}-${{ hashFiles(format('{0}/Packages/manifest.json', matrix.project)) }}
+          restore-keys: Library-${{ matrix.slug }}-
 
-      # Installs the exact editor the test project asks for, read from its ProjectVersion.txt
+      # Installs the exact editor each project asks for, read from its ProjectVersion.txt
       # so the version can never drift from the project it is meant to test.
       #
       # The Hub version is pinned because Unity Hub 3.15.0's .deb is broken: it does not create
-      # /opt/unityhub/unityhub, so installing it on a fresh Linux runner fails with ENOENT before
-      # any Unity work begins. A runner starts with no Hub and would otherwise take the latest,
-      # which is the broken one. Setting hub-version also disables the auto-update that would
-      # reintroduce it. Revisit once Unity ships a fixed package.
+      # /opt/unityhub/unityhub, so a fresh Linux runner fails with ENOENT before any Unity work
+      # begins. Revisit once Unity ships a fixed package.
       - uses: RageAgainstThePixel/unity-setup@v2
         with:
-          version-file: 'CI~/TestProject/ProjectSettings/ProjectVersion.txt'
+          version-file: ${{ matrix.project }}/ProjectSettings/ProjectVersion.txt
           hub-version: '3.14.3'
           cache-installation: true
 
-      # Activates from the ACCOUNT, not from a licence file. This is the whole reason the
-      # workflow moved off game-ci/unity-test-runner: that action requires UNITY_LICENSE to
-      # hold a legacy .ulf, and on Unity 6 no such file is produced and Unity will no longer
-      # mint one for a Personal licence.
+      # Activates from the ACCOUNT, not a licence file. Unity 6 issues an entitlement licence
+      # rather than the legacy .ulf that game-ci actions require, and Unity has discontinued
+      # manual activation of Personal licences.
       - uses: RageAgainstThePixel/activate-unity-license@v2
         with:
           license: 'Personal'
@@ -156,12 +168,23 @@ jobs:
       # can exit before the run finishes and report success for tests that never ran.
       - uses: RageAgainstThePixel/unity-action@v3
         with:
-          project-path: 'CI~/TestProject'
-          log-name: 'EditMode-Tests'
+          project-path: ${{ matrix.project }}
+          log-name: 'EditMode-Tests-${{ matrix.slug }}'
           args: '-batchmode -runTests -testPlatform EditMode -testResults ${{ github.workspace }}/test-results/results.xml'
+
+      # Nineteen tests, not zero. A licence that activates but discovers nothing goes green
+      # while proving nothing; this is the check that catches that.
+      - name: The run must contain tests
+        run: |
+          f=test-results/results.xml
+          [ -f "$f" ] || { echo "::error::no results.xml - the editor never reported"; exit 1; }
+          total=$(grep -o 'total="[0-9]*"' "$f" | head -1 | tr -dc '0-9')
+          passed=$(grep -o 'passed="[0-9]*"' "$f" | head -1 | tr -dc '0-9')
+          echo "${{ matrix.name }}: total=$total passed=$passed"
+          [ "${total:-0}" -ge 19 ] || { echo "::error::only ${total:-0} tests ran; expected at least 19"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
+          name: test-results-${{ matrix.slug }}
           path: test-results

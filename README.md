@@ -104,10 +104,12 @@ whatever scene you have open.
 `.cs` and folder has a `.meta`, that no `.meta` is orphaned, that `package.json` agrees with the
 changelog, and that `Editor/` makes no network calls — that last one guards a claim this README makes.
 
-**Then it runs all nineteen EditMode tests on a real Unity 6000.5.1f1 editor**, headless on Linux,
-against the minimal project in `CI~/TestProject` which installs this package by relative path. A green
-badge means the structure checks and the nineteen tests all passed, on hardware that is not the
-author's.
+**Then it runs all nineteen EditMode tests on real editors**, headless on Linux, against minimal
+projects under `CI~/` that install this package by relative path — once on **Unity 6** and once on
+**2021.3 LTS**, the floor this package claims support for. A green badge means the structure checks
+and both runs of the nineteen tests passed, on hardware that is not the author's. CI also asserts that
+each run actually contained nineteen tests, because a run that discovers none would otherwise pass
+while proving nothing.
 
 One honest caveat: a fork cannot see the repository's Unity credentials, and GitHub does not pass
 secrets to workflows from forks. On a fork the Unity job reports a clean skip rather than a red X, so

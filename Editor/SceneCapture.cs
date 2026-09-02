@@ -923,7 +923,13 @@ namespace SceneBaselines
         /// <summary>Assets whose contents can be recorded, keyed by how they get read.</summary>
         private static bool IsCheckableAsset(UnityEngine.Object asset)
         {
+#if UNITY_6000_0_OR_NEWER
             return asset is Material || asset is ScriptableObject || asset is PhysicsMaterial;
+#else
+            // Unity 6 renamed PhysicMaterial to PhysicsMaterial. Same type, same contents;
+            // only the spelling moved, so what gets recorded is unchanged.
+            return asset is Material || asset is ScriptableObject || asset is PhysicMaterial;
+#endif
         }
 
         /// <summary>Properties recorded per asset, higher than a component's because a material
@@ -1373,7 +1379,15 @@ namespace SceneBaselines
             sb.Append(" gravity2D=(").Append(FormatVec2(Physics2D.gravity)).Append(')');
             sb.Append(" velocityIterations2D=").Append(Physics2D.velocityIterations);
             sb.Append(" positionIterations2D=").Append(Physics2D.positionIterations);
+            // Unity 2023.2 renamed Physics2D.velocityThreshold to bounceThreshold. The KEY stays
+            // bounceThreshold2D on both branches on purpose: it is the same setting, and a baseline
+            // recorded on one editor version has to stay comparable on another. Renaming the key
+            // with the API would hand a team split across versions a finding nobody caused.
+#if UNITY_2023_2_OR_NEWER
             sb.Append(" bounceThreshold2D=").Append(FormatFloat(Physics2D.bounceThreshold));
+#else
+            sb.Append(" bounceThreshold2D=").Append(FormatFloat(Physics2D.velocityThreshold));
+#endif
             sb.Append(" defaultContactOffset2D=").Append(FormatFloat(Physics2D.defaultContactOffset));
             sb.Append(" simulationMode2D=").Append(Quote(Physics2D.simulationMode.ToString()));
             sb.Append(" queriesHitTriggers2D=").Append(Physics2D.queriesHitTriggers ? "true" : "false");

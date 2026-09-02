@@ -453,7 +453,10 @@ namespace SceneBaselines
             // Object IDs are regenerated on every domain reload. One recorded in a baseline would
             // make the next script compile look like a scene-wide regression.
             failures += Held("no object ID is recorded",
-                !state.Contains(target.GetEntityId().ToString()));
+                // GetInstanceID rather than GetEntityId: the latter only exists on very recent
+                // Unity 6 editors, and this assertion only needs SOME id that the capture must
+                // never contain. GetInstanceID exists on every supported version.
+                !state.Contains(target.GetInstanceID().ToString()));
             failures += Held("a reference is recorded by name", state.Contains("Target"));
 
             // Truncation must announce itself. A record that quietly covers less than it appears to

@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "com.benchstone.scenebaselines": "file:../../..",
+    "com.unity.test-framework": "1.1.33",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.physics": "1.0.0",
+    "com.unity.modules.physics2d": "1.0.0",
+    "com.unity.modules.ui": "1.0.0"
+  },
+  "testables": [
+    "com.benchstone.scenebaselines"
+  ]
+}
