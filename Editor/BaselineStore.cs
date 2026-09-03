@@ -376,19 +376,105 @@ namespace SceneBaselines
         /// v9 added each object's child ORDER, which under a Canvas is draw order.
         /// </remarks>
         public const int StateFormatSchemaVersion = 9;
-        public const string BaselineFolder = "Assets/SceneBaselines";
+        public const string DefaultBaselineFolder = "Assets/SceneBaselines";
+
+        /// <summary>
+        /// Where baselines are read and written. Defaults to <see cref="DefaultBaselineFolder"/>
+        /// inside the project; -baselineDir on the command line moves it anywhere, including
+        /// outside the project entirely.
+        /// </summary>
+        /// <remarks>
+        /// The override exists so a run can leave the project it inspects untouched. Replaying
+        /// another team's history means checking out commit after commit in their repository:
+        /// anything written under their Assets/ would dirty the working tree and then be
+        /// destroyed by the next checkout, and a tool that writes into a repository it was only
+        /// asked to read is one no studio should install. Writing outside the project is what
+        /// makes inspecting a repository that is not ours a read-only act.
+        /// </remarks>
+        public static string BaselineFolder => FolderOverride ?? DefaultBaselineFolder;
 
         /// <summary>Value of <see cref="Baseline.recordedBy"/> for a hand-recorded baseline.</summary>
         public const string ManualProvenance = "manual";
 
         // ── Paths ────────────────────────────────────────────────────────────────
 
-        private static string AbsoluteFolder =>
-            Path.Combine(Directory.GetParent(Application.dataPath).FullName, BaselineFolder);
+        private static string ProjectRoot => Directory.GetParent(Application.dataPath).FullName;
 
-        public static string AssetPathFor(string id) => $"{BaselineFolder}/{id}.json";
+        private static string AbsoluteFolder
+        {
+            get
+            {
+                string folder = BaselineFolder;
+                return Path.IsPathRooted(folder) ? folder : Path.Combine(ProjectRoot, folder);
+            }
+        }
+
+        /// <summary>
+        /// The project-relative asset path for a baseline, or null when baselines are being
+        /// written outside the project and are therefore not assets at all. Every AssetDatabase
+        /// call must be guarded on this: asking the AssetDatabase about a path outside the
+        /// project does not fail loudly, it just quietly does nothing.
+        /// </summary>
+        public static string AssetPathFor(string id)
+        {
+            string root = Normalize(ProjectRoot);
+            string full = Normalize(AbsolutePathFor(id));
+
+            return full.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase)
+                ? full.Substring(root.Length + 1)
+                : null;
+        }
 
         private static string AbsolutePathFor(string id) => Path.Combine(AbsoluteFolder, id + ".json");
+
+        /// <summary>Full path, forward slashes, no trailing slash — comparable across both.</summary>
+        private static string Normalize(string path)
+        {
+            try { return Path.GetFullPath(path).Replace('\\', '/').TrimEnd('/'); }
+            catch { return path.Replace('\\', '/').TrimEnd('/'); }
+        }
+
+        // -- Output location override --------------------------------------------
+
+        private static string _folderOverride;
+        private static bool _folderOverrideResolved;
+
+        /// <summary>
+        /// Overrides <see cref="BaselineFolder"/>; null means the default. Read from
+        /// -baselineDir on the command line the first time it is used, so batch runs need no
+        /// code change. Assigning null restores the default and is how a test cleans up.
+        /// </summary>
+        public static string FolderOverride
+        {
+            get
+            {
+                if (!_folderOverrideResolved)
+                {
+                    _folderOverride = ReadFolderOverrideArgument();
+                    _folderOverrideResolved = true;
+                }
+
+                return _folderOverride;
+            }
+            set
+            {
+                _folderOverride = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+                _folderOverrideResolved = true;
+            }
+        }
+
+        private static string ReadFolderOverrideArgument()
+        {
+            string[] args = Environment.GetCommandLineArgs();
+
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (string.Equals(args[i], "-baselineDir", StringComparison.OrdinalIgnoreCase))
+                    return string.IsNullOrWhiteSpace(args[i + 1]) ? null : args[i + 1].Trim();
+            }
+
+            return null;
+        }
 
         // ── Save ─────────────────────────────────────────────────────────────────
 
@@ -414,6 +500,8 @@ namespace SceneBaselines
                     JsonUtility.ToJson(baseline, true), new UTF8Encoding(false));
 
                 string assetPath = AssetPathFor(baseline.id);
+                if (assetPath == null)
+                    return AbsolutePathFor(baseline.id);   // written outside the project
 
                 // Import just this file. A full AssetDatabase.Refresh() is heavier and can fire
                 // in the middle of a verification pass, which is exactly where this gets called.
@@ -651,7 +739,7 @@ namespace SceneBaselines
                 return false;
 
             string assetPath = AssetPathFor(id);
-            if (AssetDatabase.DeleteAsset(assetPath))
+            if (assetPath != null && AssetDatabase.DeleteAsset(assetPath))
                 return true;
 
             // Not imported as an asset (hand-copied in, or written while Unity was closed).

@@ -191,8 +191,9 @@ jobs:
           log-name: 'EditMode-Tests-${{ matrix.slug }}'
           args: '-batchmode -runTests -testPlatform EditMode -testResults ${{ github.workspace }}/test-results/results.xml'
 
-      # Nineteen tests, not zero. A licence that activates but discovers nothing goes green
-      # while proving nothing; this is the check that catches that.
+      # Twenty tests, not zero. A licence that activates but discovers nothing goes green
+      # while proving nothing; this is the check that catches that. Raise the floor whenever a
+      # test is added, or the guarantee quietly weakens by one test at a time.
       - name: The run must contain tests
         run: |
           f=test-results/results.xml
@@ -200,7 +201,7 @@ jobs:
           total=$(grep -o 'total="[0-9]*"' "$f" | head -1 | tr -dc '0-9')
           passed=$(grep -o 'passed="[0-9]*"' "$f" | head -1 | tr -dc '0-9')
           echo "${{ matrix.name }}: total=$total passed=$passed"
-          [ "${total:-0}" -ge 19 ] || { echo "::error::only ${total:-0} tests ran; expected at least 19"; exit 1; }
+          [ "${total:-0}" -ge 20 ] || { echo "::error::only ${total:-0} tests ran; expected at least 20"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         if: always()

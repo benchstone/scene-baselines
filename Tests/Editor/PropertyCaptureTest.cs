@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
@@ -89,6 +90,7 @@ namespace SceneBaselines
         }
 
         [Test, Order(19)] public void Capture_does_not_depend_on_locale() => Verify(CheckCaptureDoesNotDependOnLocale);
+        [Test, Order(20)] public void Baselines_can_be_written_outside_the_project() => Verify(CheckBaselinesCanBeWrittenOutsideTheProject);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -290,6 +292,7 @@ namespace SceneBaselines
                 failures += CheckDedupCoversEverySection();
                 failures += InASavedScene(CheckCaptureIsStableAcrossReopen);
                 failures += CheckCaptureDoesNotDependOnLocale();
+                failures += CheckBaselinesCanBeWrittenOutsideTheProject();
             }
             finally
             {
@@ -1429,6 +1432,83 @@ namespace SceneBaselines
             baseline.assets = new List<BaselineAssetRecord>();
             return baseline;
         }
+
+        /// <summary>
+        /// A run must be able to leave the project it inspects completely untouched.
+        /// </summary>
+        /// <remarks>
+        /// This is the guarantee that makes it safe to point the tool at a repository that is not
+        /// ours. Replaying another team's history checks out commit after commit, and a baseline
+        /// written under their Assets/ would both dirty their working tree and be destroyed by the
+        /// next checkout — so the folder has to be movable outside the project entirely.
+        ///
+        /// The assertions are deliberately about the FILESYSTEM rather than about return values.
+        /// The failure being guarded is a file appearing where nobody asked for one, and only
+        /// looking on disk can see that; a function can return the right path and still have
+        /// written somewhere else on the way.
+        /// </remarks>
+        private static int CheckBaselinesCanBeWrittenOutsideTheProject()
+        {
+            int failures = 0;
+
+            const string id = "outside-the-project-test";
+
+            string outside = Path.Combine(Path.GetTempPath(),
+                "SceneBaselinesOutside-" + System.Guid.NewGuid().ToString("N"));
+
+            string projectFolder = Path.Combine(
+                Directory.GetParent(Application.dataPath).FullName,
+                BaselineStore.DefaultBaselineFolder);
+
+            int filesInProjectBefore = CountJsonFiles(projectFolder);
+            string originalOverride = BaselineStore.FolderOverride;
+
+            try
+            {
+                BaselineStore.FolderOverride = outside;
+
+                Baseline baseline = Baseline(Rec("Player", "speed=5", "GlobalObjectId_V1-2-abc-111-0"));
+                baseline.id = id;
+                baseline.scenePath = "Assets/Scenes/NotOurs.unity";
+
+                string written = BaselineStore.Save(baseline);
+
+                failures += Held("a baseline saves to the folder it was pointed at",
+                    File.Exists(Path.Combine(outside, id + ".json")));
+
+                failures += Held("the returned path is the file that was actually written",
+                    written != null && File.Exists(written));
+
+                // Outside the project there is no such thing as an asset path, and every
+                // AssetDatabase call is guarded on this returning null.
+                failures += Held("a baseline outside the project is not treated as an asset",
+                    BaselineStore.AssetPathFor(id) == null);
+
+                failures += Held("it reads back from where it was written",
+                    BaselineStore.LoadAll().Any(b => b.id == id));
+
+                failures += Held("nothing was written into the project",
+                    CountJsonFiles(projectFolder) == filesInProjectBefore);
+            }
+            finally
+            {
+                BaselineStore.FolderOverride = originalOverride;
+
+                try { if (Directory.Exists(outside)) Directory.Delete(outside, true); }
+                catch { /* a leftover temp folder is not worth failing a test over */ }
+            }
+
+            // A run that pointed the folder elsewhere must not leave the editor writing there for
+            // the rest of the session.
+            failures += Held("clearing the override restores the project folder",
+                originalOverride != null ||
+                BaselineStore.BaselineFolder == BaselineStore.DefaultBaselineFolder);
+
+            return failures;
+        }
+
+        private static int CountJsonFiles(string folder) =>
+            Directory.Exists(folder) ? Directory.GetFiles(folder, "*.json").Length : 0;
 
         private static BaselineObjectRecord Rec(string path, string state, string id) =>
             new BaselineObjectRecord { path = path, state = state, id = id };

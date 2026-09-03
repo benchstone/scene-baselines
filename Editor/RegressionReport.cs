@@ -42,6 +42,9 @@ namespace SceneBaselines
     //
     //   Optional args:  -reportDir <dir>     where to write (default SceneBaselineReports/)
     //                   -baselineScene <Assets/...>  check only this scene; repeatable
+    //                   -baselineDir <dir>   where baselines live (default Assets/SceneBaselines).
+    //                                        Point it outside the project to inspect a repository
+    //                                        without writing a single file into it.
     //
     //   Do NOT pass -quit: this method calls EditorApplication.Exit itself so it can
     //   return a meaningful code, and -quit would race it to a 0.
