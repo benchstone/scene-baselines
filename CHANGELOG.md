@@ -4,7 +4,7 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-09-05
 
 ### Fixed
 
@@ -14,6 +14,13 @@ All notable changes to this package are documented here. The format follows
   reported changes nobody made — a fifth of all findings in a 15-commit replay over a
   real project. An explicit override is still asserted; a material that inherits its
   queue now records that it inherits it.
+- A hierarchy path built under same-named siblings now carries the sibling's `#n` through
+  to its children. The suffix used to be appended to the finished path, so the sixteenth
+  object named `Imp` was recorded as `Entrance/Imp#15` while its own child read
+  `Entrance/Imp/Graphics#15` — hanging off the FIRST `Imp`. Paths stayed unique, so nothing
+  failed loudly; the reader was simply sent to the wrong object, for 10.7% of all objects
+  in the project this was measured on. Matching is unaffected — objects pair by
+  `GlobalObjectId`, and the path is display.
 
 ### Changed
 
@@ -23,6 +30,14 @@ All notable changes to this package are documented here. The format follows
   old resolved number and every material would otherwise report a queue nobody touched.
   The report says the section was not covered and asks for a re-record — it never
   reports uncompared assets as clean.
+- Findings are grouped by what caused them before they are printed. A deleted subtree
+  reports once, naming how many objects went with it; objects that changed the same set of
+  properties report as one line naming that set. Everything else prints exactly as before.
+- Grouping is presentation only, and deliberately never filtering: the finding count and
+  the verdict are identical either way, every finding is still listed inside its group, and
+  the report states the full count before the groups so a short report cannot be mistaken
+  for a quiet one. Measured on a 15-commit replay of a real project, where one scene
+  produced 936 true findings nobody could read — the same scene now renders as 45 groups.
 
 ## [0.1.0] — 2026-08-13
 

@@ -402,16 +402,16 @@ namespace SceneBaselines
         }
 
         /// <summary>Stable token for a finding kind. Part of the consumed contract — do not rename.</summary>
-        private static string FindingKindToken(RegressionKind kind)
+        internal static string FindingKindToken(RegressionKind kind)
         {
             switch (kind)
             {
-                case RegressionKind.Missing:         return "missing";
+                case RegressionKind.Missing:         return RegressionKinds.Missing;
                 case RegressionKind.Moved:           return "moved";
                 case RegressionKind.Added:           return "added";
                 case RegressionKind.AssetChanged:    return "asset-changed";
                 case RegressionKind.SettingsChanged: return "settings-changed";
-                default:                             return "changed";
+                default:                             return RegressionKinds.Changed;
             }
         }
 
@@ -591,11 +591,29 @@ namespace SceneBaselines
                 sb.AppendLine();
             }
 
-            foreach (ReportFinding finding in baseline.findings)
+            var items = new List<FindingRollup.Item>(baseline.findings.Count);
+            foreach (ReportFinding f in baseline.findings)
+                items.Add(new FindingRollup.Item(f.kind, f.path, f.changes));
+
+            List<FindingRollup.Group> groups = FindingRollup.Build(items);
+
+            // Said before the list, not after it: a reader looking at 45 bullets under a headline
+            // count of 936 has to know immediately that the other 891 were grouped, not dropped.
+            if (groups.Count < baseline.findings.Count)
             {
-                if (finding.kind == "missing")
+                sb.AppendLine($"{baseline.findings.Count} findings, grouped into {groups.Count} by what " +
+                    "caused them. Every finding is still listed below, inside its group.");
+                sb.AppendLine();
+            }
+
+            foreach (FindingRollup.Group group in groups)
+            {
+                ReportFinding finding = baseline.findings[group.Lead];
+
+                if (finding.kind == RegressionKinds.Missing)
                 {
                     sb.AppendLine($"- **MISSING** {Code(finding.path)} — recorded as known-good, not in the scene now");
+                    AppendGroupMembers(sb, baseline.findings, group);
                     continue;
                 }
 
@@ -648,9 +666,35 @@ namespace SceneBaselines
                     sb.AppendLine($"  - was: {Code(finding.baselineState)}");
                     sb.AppendLine($"  - now: {Code(finding.liveState)}");
                 }
+
+                AppendGroupMembers(sb, baseline.findings, group);
             }
 
             sb.AppendLine();
+        }
+
+        /// <summary>
+        /// The rest of a rolled-up group: a few named, then a count.
+        /// </summary>
+        /// <remarks>
+        /// Named rather than only counted, because a reader can check three real paths and cannot
+        /// check "805 objects beneath it". The count stays exact whatever gets printed.
+        /// </remarks>
+        private static void AppendGroupMembers(StringBuilder sb, List<ReportFinding> findings,
+            FindingRollup.Group group)
+        {
+            if (!group.IsRolledUp)
+                return;
+
+            int others = group.Count - 1;
+            sb.AppendLine($"  - **and {others} more**, {group.Cause}:");
+
+            int named = Math.Min(FindingRollup.MembersNamed, others);
+            for (int i = 1; i <= named; i++)
+                sb.AppendLine($"    - {Code(findings[group.Members[i]].path)}");
+
+            if (others > named)
+                sb.AppendLine($"    - ... and {others - named} more");
         }
 
         /// <summary>

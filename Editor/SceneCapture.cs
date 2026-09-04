@@ -110,6 +110,65 @@ namespace SceneBaselines
             return string.Join("/", parts);
         }
 
+        /// <summary>
+        /// Display paths for a swept list, disambiguated so that a twin's suffix reaches the objects
+        /// underneath it.
+        /// </summary>
+        /// <remarks>
+        /// ONE method, because capture and <see cref="FindByRecordedPath"/> have to agree exactly on
+        /// which twin is "#2" -- two separate rules could quietly hand back the wrong object, which
+        /// looks like it worked and is worse than returning nothing.
+        ///
+        /// <para>The suffix has to be part of the path the CHILDREN are built from, not appended to a
+        /// finished path. Appending it produced paths that were unique but pointed at the wrong
+        /// parent: with 22 objects named Imp, the sixteenth was "Entrance/Imp#15" while its own child
+        /// read "Entrance/Imp/ImpGraphics#15" -- hanging off the FIRST Imp, because the parent segment
+        /// was rebuilt from the raw name. On Boss Room that misdirected 10.7% of all objects, and it
+        /// made every twin's subtree read as one enormous subtree under twin number one.</para>
+        ///
+        /// <para>Parents are assigned before their children, which the sweep order already guarantees:
+        /// it sorts by hierarchy path, and a parent's path is a prefix of its children's. An object
+        /// whose parent is not in the list -- a root, or a parent the sweep excluded -- falls back to
+        /// the raw walk, which is exactly right for it.</para>
+        ///
+        /// <para>Matching does not rest on any of this: identity comes from the id, and the path is
+        /// display. It is the reader who was being sent to the wrong object.</para>
+        /// </remarks>
+        private static List<string> DisambiguatedPaths(List<GameObject> objects)
+        {
+            var assigned = new Dictionary<Transform, string>();
+            var seen = new Dictionary<string, int>();
+            var paths = new List<string>(objects.Count);
+
+            foreach (GameObject go in objects)
+            {
+                Transform parent = go.transform.parent;
+                string path = parent != null && assigned.TryGetValue(parent, out string parentPath)
+                    ? parentPath + "/" + go.name
+                    : GetHierarchyPath(go.transform);
+
+                // Same-named siblings still collide, so one of them takes a "#n" suffix. It is
+                // assigned walking the list in the order the sweep fixed -- by hierarchy path, then
+                // by sibling index -- so the same twin keeps the same suffix across captures. It used
+                // to follow the raw sweep, which meant the DISPLAY name of a twin could move between
+                // two captures of an unchanged scene.
+                if (seen.TryGetValue(path, out int count))
+                {
+                    seen[path] = count + 1;
+                    path += "#" + (count + 1);
+                }
+                else
+                {
+                    seen[path] = 1;
+                }
+
+                assigned[go.transform] = path;
+                paths.Add(path);
+            }
+
+            return paths;
+        }
+
         /// <summary>An object's place in the hierarchy, as a chain of sibling indices that sorts.</summary>
         /// <remarks>
         /// Only used to order same-named siblings. They share a hierarchy path by definition, so the
@@ -178,7 +237,6 @@ namespace SceneBaselines
         public static SceneSnapshot CaptureSceneSnapshot()
         {
             var snapshot = new SceneSnapshot();
-            var seen = new Dictionary<string, int>();
 
             // Collected first, then described, so identities can be fetched for the whole scene in
             // ONE call. GlobalObjectId's per-object overload is named "Slow" for a reason and capture
@@ -188,32 +246,17 @@ namespace SceneBaselines
 
             List<string> ids = CaptureObjectIds(objects);
 
+            // The pairing does not rest on the path either way: identity comes from the id below,
+            // so twins match each other correctly even where a suffix does move.
+            List<string> paths = DisambiguatedPaths(objects);
+
             for (int i = 0; i < objects.Count; i++)
             {
                 GameObject go = objects[i];
-                string path = GetHierarchyPath(go.transform);
-
-                // Same-named siblings still collide on path, so one of them takes a "#n" suffix. It is
-                // assigned walking the list in the order the sweep fixed — by hierarchy path, then by
-                // sibling index — so the same twin keeps the same suffix across captures. It used to
-                // follow the raw sweep, which meant the DISPLAY name of a twin could move between two
-                // captures of an unchanged scene.
-                //
-                // The pairing does not rest on it either way: identity comes from the id below, so
-                // twins match each other correctly even where a suffix does move.
-                if (seen.TryGetValue(path, out int count))
-                {
-                    seen[path] = count + 1;
-                    path += "#" + (count + 1);
-                }
-                else
-                {
-                    seen[path] = 1;
-                }
 
                 snapshot.objects.Add(new SceneObjectRecord
                 {
-                    path = path,
+                    path = paths[i],
                     state = DescribeObjectState(go),
                     id = ids[i]
                 });
@@ -310,24 +353,13 @@ namespace SceneBaselines
             if (string.IsNullOrEmpty(recordedPath))
                 return null;
 
-            var seen = new Dictionary<string, int>();
+            List<GameObject> objects = SweepActiveSceneObjects();
+            List<string> paths = DisambiguatedPaths(objects);
 
-            foreach (GameObject go in SweepActiveSceneObjects())
+            for (int i = 0; i < objects.Count; i++)
             {
-                string path = GetHierarchyPath(go.transform);
-
-                if (seen.TryGetValue(path, out int count))
-                {
-                    seen[path] = count + 1;
-                    path += "#" + (count + 1);
-                }
-                else
-                {
-                    seen[path] = 1;
-                }
-
-                if (string.Equals(path, recordedPath, StringComparison.Ordinal))
-                    return go;
+                if (string.Equals(paths[i], recordedPath, StringComparison.Ordinal))
+                    return objects[i];
             }
 
             return null;

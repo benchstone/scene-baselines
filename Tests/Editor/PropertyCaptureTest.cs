@@ -92,6 +92,9 @@ namespace SceneBaselines
         [Test, Order(19)] public void Capture_does_not_depend_on_locale() => Verify(CheckCaptureDoesNotDependOnLocale);
         [Test, Order(20)] public void Baselines_can_be_written_outside_the_project() => Verify(CheckBaselinesCanBeWrittenOutsideTheProject);
         [Test, Order(21)] public void Render_queue_records_the_override_not_the_resolved_value() => Verify(CheckRenderQueueRecordsTheOverride);
+        [Test, Order(22)] public void A_twins_children_hang_from_the_twin() => Verify(() => InASavedScene(CheckTwinChildrenHangFromTheTwin));
+        [Test, Order(23)] public void Findings_group_by_cause_without_losing_any() => Verify(CheckFindingsGroupByCause);
+        [Test, Order(24)] public void A_grouped_report_still_prints_every_finding() => Verify(CheckGroupedReportPrintsEveryFinding);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -295,6 +298,9 @@ namespace SceneBaselines
                 failures += CheckCaptureDoesNotDependOnLocale();
                 failures += CheckBaselinesCanBeWrittenOutsideTheProject();
                 failures += CheckRenderQueueRecordsTheOverride();
+                failures += InASavedScene(CheckTwinChildrenHangFromTheTwin);
+                failures += CheckFindingsGroupByCause();
+                failures += CheckGroupedReportPrintsEveryFinding();
             }
             finally
             {
@@ -1441,6 +1447,237 @@ namespace SceneBaselines
             baseline.settings = settings.ToList();
             baseline.assets = new List<BaselineAssetRecord>();
             return baseline;
+        }
+
+        // ── Does a path lead the reader to the right object? ────────────────────
+
+        /// <remarks>
+        /// Found on Boss Room, where 22 objects were named Imp. The sixteenth was recorded as
+        /// "Entrance/Imp#15" and its own child as "Entrance/Imp/ImpGraphics#15" -- the parent segment
+        /// rebuilt from the raw name, so the child read as hanging off the FIRST Imp. Paths stayed
+        /// unique, so nothing failed loudly; 10.7% of that project's objects simply pointed the
+        /// reader at the wrong place, and any attempt to group findings by subtree inherited the lie.
+        /// </remarks>
+        private static int CheckTwinChildrenHangFromTheTwin()
+        {
+            int failures = 0;
+
+            var first = new GameObject("Twin");
+            var second = new GameObject("Twin");
+            var firstChild = new GameObject("Graphics");
+            var secondChild = new GameObject("Graphics");
+
+            try
+            {
+                firstChild.transform.SetParent(first.transform);
+                secondChild.transform.SetParent(second.transform);
+
+                SceneSnapshot snapshot = SceneCapture.CaptureSceneSnapshot();
+                List<string> paths = snapshot.objects.Select(o => o.path).ToList();
+
+                // The twins themselves: one plain, one suffixed. Unchanged behaviour, asserted so a
+                // fix to the children cannot quietly rewrite the parents.
+                failures += Held("one twin keeps the plain path", paths.Contains("Twin"));
+                failures += Held("the other twin takes a suffix", paths.Contains("Twin#2"));
+
+                // The point of the whole change: the suffix reaches the child.
+                failures += Held("the second twin's child hangs from the SECOND twin",
+                    paths.Contains("Twin#2/Graphics"));
+                failures += Held("no child is recorded under a twin it does not belong to",
+                    !paths.Contains("Twin/Graphics#2"));
+
+                // A path is only worth printing if it leads back to the object it names.
+                failures += Held("the recorded path resolves to the object it names",
+                    SceneCapture.FindByRecordedPath("Twin#2/Graphics") == secondChild &&
+                    SceneCapture.FindByRecordedPath("Twin/Graphics") == firstChild);
+
+                // Every path must still be unique, or the record cannot hold two objects apart.
+                failures += Held("every recorded path is unique",
+                    paths.Count == paths.Distinct().Count());
+            }
+            finally
+            {
+                Object.DestroyImmediate(first);
+                Object.DestroyImmediate(second);
+            }
+
+            return failures;
+        }
+
+        // ── Is a long report readable without becoming a dishonest one? ─────────
+
+        /// <remarks>
+        /// Measured on Boss Room: 3,022 findings, all true, and unreadable. 1,438 of 1,548 "missing"
+        /// findings had a missing ANCESTOR -- a few deleted subtrees listed bone by bone -- and 597
+        /// of 715 "changed" findings sat in clusters that changed the same property set. Grouping is
+        /// presentation only: the count, the verdict, and every individual finding survive it.
+        /// </remarks>
+        private static int CheckFindingsGroupByCause()
+        {
+            int failures = 0;
+
+            // A deleted subtree: a root, two children and a grandchild, plus one unrelated deletion.
+            var subtree = new List<FindingRollup.Item>
+            {
+                RollupItem("missing", "Level/Enemy"),
+                RollupItem("missing", "Level/Enemy/Graphics"),
+                RollupItem("missing", "Level/Enemy/Graphics/Bone"),
+                RollupItem("missing", "Level/Enemy/Collider"),
+                RollupItem("missing", "Level/Torch")
+            };
+
+            List<FindingRollup.Group> groups = FindingRollup.Build(subtree);
+
+            failures += Held("a deleted subtree is one group, and the unrelated deletion another",
+                groups.Count == 2);
+            failures += Held("the subtree groups under its topmost missing object",
+                groups[0].Count == 4 && subtree[groups[0].Lead].Path == "Level/Enemy");
+            failures += Held("an unrelated deletion is left alone",
+                groups[1].Count == 1 && !groups[1].IsRolledUp);
+
+            // A near-miss: a path that merely starts with the same TEXT is not a descendant.
+            var lookalike = new List<FindingRollup.Item>
+            {
+                RollupItem("missing", "Level/Enemy"),
+                RollupItem("missing", "Level/EnemySpawner")
+            };
+            failures += Held("a name that only shares a prefix is not swallowed as a child",
+                FindingRollup.Build(lookalike).Count == 2);
+
+            // Same-change clustering, at the threshold and one below it.
+            failures += Held("five objects changing the same property are one group",
+                FindingRollup.Build(ChangedItems(5, "pos")).Count == 1);
+            failures += Held("four are still worth reading one by one",
+                FindingRollup.Build(ChangedItems(4, "pos")).Count == 4);
+            failures += Held("objects changing DIFFERENT properties are not grouped together",
+                FindingRollup.Build(ChangedItems(5, "pos").Concat(ChangedItems(5, "mass")).ToList()).Count == 2);
+
+            // A value carrying a colon must not become the cluster key, or nothing would cluster.
+            failures += Held("the property name is read up to the FIRST colon",
+                FindingRollup.KeyOf("Skill1: (Base) → (ImpBaseAttack:MeleeAction)") == "Skill1");
+
+            // The property the whole feature rests on: grouping is not filtering.
+            List<FindingRollup.Item> mixed = subtree.Concat(ChangedItems(6, "pos")).ToList();
+            List<FindingRollup.Group> mixedGroups = FindingRollup.Build(mixed);
+
+            failures += Held("every finding lands in exactly one group",
+                mixedGroups.Sum(g => g.Count) == mixed.Count &&
+                mixedGroups.SelectMany(g => g.Members).Distinct().Count() == mixed.Count);
+            failures += Held("grouping shortened the report",
+                mixedGroups.Count < mixed.Count);
+
+            return failures;
+        }
+
+        /// <remarks>
+        /// The roll-up is only worth having if the rendering it feeds is honest. A grouped report
+        /// that quietly stopped printing members would look like a triumph -- 936 findings rendered
+        /// as 45 lines -- while hiding 891 real regressions, which is the one failure this tool
+        /// cannot survive. So this asserts on the RENDERED TEXT: the total is stated, the group is
+        /// named, members are printed, and nothing claims a smaller number than was found.
+        /// </remarks>
+        private static int CheckGroupedReportPrintsEveryFinding()
+        {
+            int failures = 0;
+
+            var recorded = new List<BaselineObjectRecord>
+            {
+                Rec("Level/Enemy", "state=1", "id-enemy"),
+                Rec("Level/Enemy/Graphics", "state=1", "id-graphics"),
+                Rec("Level/Enemy/Graphics/Bone", "state=1", "id-bone"),
+                Rec("Level/Keep", "state=1", "id-keep")
+            };
+
+            // The whole subtree is gone; the unrelated object is untouched.
+            var live = new List<BaselineObjectRecord> { Rec("Level/Keep", "state=1", "id-keep") };
+
+            BaselineComparison comparison = CompareObjects(recorded, live);
+            string rendered = RegressionCheck.DescribeComparison(comparison);
+
+            failures += Held("the subtree is still three findings, not one",
+                comparison.findings.Count == 3);
+
+            failures += Held("the report states the true finding count before grouping them",
+                rendered.Contains("3 finding(s), grouped into 1"));
+
+            failures += Held("the group's root is named in full",
+                rendered.Contains("MISSING  Level/Enemy"));
+
+            failures += Held("the group says how many went with it",
+                rendered.Contains("and 2 more"));
+
+            // The members themselves, printed. Without this the count above is an unverifiable claim.
+            failures += Held("the members are named, not merely counted",
+                rendered.Contains("Level/Enemy/Graphics") &&
+                rendered.Contains("Level/Enemy/Graphics/Bone"));
+
+            // A clean scene must not grow a grouping line it has no use for.
+            string clean = RegressionCheck.DescribeComparison(CompareObjects(
+                new List<BaselineObjectRecord> { Rec("Level/Keep", "state=1", "id-keep") },
+                new List<BaselineObjectRecord> { Rec("Level/Keep", "state=1", "id-keep") }));
+
+            failures += Held("a clean comparison says nothing about grouping",
+                !clean.Contains("grouped into"));
+
+            // The markdown is the rendering a reviewer actually reads on a pull request, and it
+            // groups through the same code by a different path. Asserted separately because "both
+            // renderers agree" is exactly the kind of claim that stops being true silently.
+            // Filled in the way a real run leaves it: RenderMarkdown is always handed a finished
+            // report and reads the run-wide fields before it reaches a single finding.
+            var report = new RegressionReport.Report
+            {
+                verdict = "regressions",
+                totalFindings = comparison.findings.Count,
+                scenesChecked = 1,
+                baselinesCompared = 1
+            };
+            var scene = new RegressionReport.ReportScene { sceneName = "Level", scenePath = "Assets/Level.unity" };
+            var entry = new RegressionReport.ReportBaseline { id = "b1", verdict = "regressions" };
+
+            foreach (RegressionFinding finding in comparison.findings)
+            {
+                entry.findings.Add(new RegressionReport.ReportFinding
+                {
+                    path = finding.path,
+                    kind = "missing",
+                    changes = new List<string>()
+                });
+            }
+
+            scene.baselines.Add(entry);
+            report.scenes.Add(scene);
+
+            string markdown = RegressionReport.RenderMarkdown(report);
+
+            failures += Held("the markdown states the true count before grouping",
+                markdown.Contains("3 findings, grouped into 1"));
+            failures += Held("the markdown names the group's root",
+                markdown.Contains("Level/Enemy"));
+            failures += Held("the markdown names the members it grouped",
+                markdown.Contains("Level/Enemy/Graphics") &&
+                markdown.Contains("Level/Enemy/Graphics/Bone"));
+            failures += Held("the markdown says how many went with the root",
+                markdown.Contains("and 2 more"));
+
+            return failures;
+        }
+
+        private static FindingRollup.Item RollupItem(string kind, string path, params string[] changes)
+        {
+            return new FindingRollup.Item(kind, path, changes);
+        }
+
+        private static List<FindingRollup.Item> ChangedItems(int count, string property)
+        {
+            var items = new List<FindingRollup.Item>();
+            for (int i = 0; i < count; i++)
+            {
+                // Different VALUES on purpose: objects that each moved somewhere different still had
+                // the same thing happen to them, and that is what the group is claiming.
+                items.Add(RollupItem("changed", "Level/Prop" + i, property + ": 0 → " + i));
+            }
+
+            return items;
         }
 
         // ── Does the record hold still when nothing was changed? ─────────────────

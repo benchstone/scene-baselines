@@ -1043,7 +1043,9 @@ namespace SceneBaselines
                 : listed;
         }
 
-        private static string DescribeComparison(BaselineComparison comparison)
+        /// <summary>One baseline's outcome as text. Public so a test can hold the rendering itself
+        /// to account: grouping findings is only safe if the renderer still prints every one.</summary>
+        public static string DescribeComparison(BaselineComparison comparison)
         {
             var sb = new StringBuilder();
 
@@ -1148,11 +1150,24 @@ namespace SceneBaselines
                     "findings below are that revert — not regressions.");
             }
 
-            foreach (RegressionFinding finding in comparison.findings)
+            List<FindingRollup.Group> groups = GroupFindings(comparison.findings);
+
+            // Said once, up front, so a reader who sees 45 lines under a count of 936 knows nothing
+            // was dropped. A report that quietly shortened itself would be worse than a long one.
+            if (groups.Count < comparison.findings.Count)
             {
+                sb.AppendLine($"   {comparison.findings.Count} finding(s), grouped into {groups.Count} " +
+                    "by what caused them — every one is still below.");
+            }
+
+            foreach (FindingRollup.Group group in groups)
+            {
+                RegressionFinding finding = comparison.findings[group.Lead];
+
                 if (finding.kind == RegressionKind.Missing)
                 {
                     sb.AppendLine($"   MISSING  {finding.path} — recorded as known-good, not in the scene now");
+                    AppendGroupMembers(sb, comparison.findings, group);
                     continue;
                 }
 
@@ -1213,9 +1228,52 @@ namespace SceneBaselines
                     sb.AppendLine($"              was:  {finding.baselineState}");
                     sb.AppendLine($"              now:  {finding.liveState}");
                 }
+
+                AppendGroupMembers(sb, comparison.findings, group);
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>Groups a comparison's findings by cause, for any renderer that has to print them.</summary>
+        internal static List<FindingRollup.Group> GroupFindings(List<RegressionFinding> findings)
+        {
+            var items = new List<FindingRollup.Item>(findings.Count);
+
+            foreach (RegressionFinding finding in findings)
+            {
+                items.Add(new FindingRollup.Item(
+                    RegressionReport.FindingKindToken(finding.kind),
+                    finding.path,
+                    finding.changedSegments));
+            }
+
+            return FindingRollup.Build(items);
+        }
+
+        /// <summary>
+        /// The rest of a rolled-up group: a few named, then a count.
+        /// </summary>
+        /// <remarks>
+        /// Named rather than only counted, because "805 objects beneath it" cannot be checked by a
+        /// reader and three real paths can. The count is still exact, so nothing rests on how many
+        /// happen to be printed.
+        /// </remarks>
+        private static void AppendGroupMembers(System.Text.StringBuilder sb,
+            List<RegressionFinding> findings, FindingRollup.Group group)
+        {
+            if (!group.IsRolledUp)
+                return;
+
+            int others = group.Count - 1;
+            sb.AppendLine($"              — and {others} more, {group.Cause}:");
+
+            int named = Math.Min(FindingRollup.MembersNamed, others);
+            for (int i = 1; i <= named; i++)
+                sb.AppendLine($"                  {findings[group.Members[i]].path}");
+
+            if (others > named)
+                sb.AppendLine($"                  ... and {others - named} more");
         }
 
         // ── State diffing ────────────────────────────────────────────────────────
