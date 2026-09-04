@@ -4,6 +4,26 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A material's render queue is recorded as the override the material itself stores, not
+  as the value Unity resolves from the shader. The resolved value depends on how far
+  shader import has progressed, so it moved between runs over an unchanged project and
+  reported changes nobody made — a fifth of all findings in a 15-commit replay over a
+  real project. An explicit override is still asserted; a material that inherits its
+  queue now records that it inherits it.
+
+### Changed
+
+- State schema is now **v11**. Only the asset section changed: objects, settings and
+  identities in an existing baseline keep comparing exactly as before. Asset records
+  written at v10 or earlier are set aside rather than compared, because they hold the
+  old resolved number and every material would otherwise report a queue nobody touched.
+  The report says the section was not covered and asks for a re-record — it never
+  reports uncompared assets as clean.
+
 ## [0.1.0] — 2026-08-13
 
 First public release.

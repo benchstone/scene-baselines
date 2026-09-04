@@ -91,6 +91,7 @@ namespace SceneBaselines
 
         [Test, Order(19)] public void Capture_does_not_depend_on_locale() => Verify(CheckCaptureDoesNotDependOnLocale);
         [Test, Order(20)] public void Baselines_can_be_written_outside_the_project() => Verify(CheckBaselinesCanBeWrittenOutsideTheProject);
+        [Test, Order(21)] public void Render_queue_records_the_override_not_the_resolved_value() => Verify(CheckRenderQueueRecordsTheOverride);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -293,6 +294,7 @@ namespace SceneBaselines
                 failures += InASavedScene(CheckCaptureIsStableAcrossReopen);
                 failures += CheckCaptureDoesNotDependOnLocale();
                 failures += CheckBaselinesCanBeWrittenOutsideTheProject();
+                failures += CheckRenderQueueRecordsTheOverride();
             }
             finally
             {
@@ -664,14 +666,22 @@ namespace SceneBaselines
             failures += Held("a pre-asset baseline reports that it does not cover assets",
                 !older.RecordsAssets && current.RecordsAssets);
 
+            // Recording assets and being able to COMPARE them are now two different claims.
+            failures += Held("a baseline predating the render-queue record cannot compare assets",
+                !new Baseline { schemaVersion = BaselineStore.AssetStateFormatSchemaVersion - 1 }
+                    .AssetStateComparable &&
+                new Baseline { schemaVersion = BaselineStore.AssetStateFormatSchemaVersion }
+                    .AssetStateComparable);
+
             return failures;
         }
 
-        private static BaselineComparison CompareAssetStates(string recorded, string live)
+        private static BaselineComparison CompareAssetStates(string recorded, string live,
+            int schemaVersion = BaselineStore.SchemaVersion)
         {
             var baseline = new Baseline
             {
-                schemaVersion = BaselineStore.SchemaVersion,
+                schemaVersion = schemaVersion,
                 objects = new List<BaselineObjectRecord>(),
                 assets = new List<BaselineAssetRecord>
                 {
@@ -1431,6 +1441,86 @@ namespace SceneBaselines
             baseline.settings = settings.ToList();
             baseline.assets = new List<BaselineAssetRecord>();
             return baseline;
+        }
+
+        // ── Does the record hold still when nothing was changed? ─────────────────
+
+        /// <remarks>
+        /// Guards the single largest source of invented findings ever measured here. Replaying 15
+        /// BossRoom commits on 2026-09-04 produced 3,022 findings, and 621 of them — a fifth of
+        /// everything the tool said — were materials reporting "renderQueue: 3000 -> 2000" at
+        /// commits that touched no .mat file at all. The same 41 materials said it at EVERY commit,
+        /// because Material.renderQueue is computed from the shader and resolves differently
+        /// depending on how far shader import has progressed. Recording the stored override instead
+        /// is what makes the number evidence rather than weather.
+        /// </remarks>
+        private static int CheckRenderQueueRecordsTheOverride()
+        {
+            int failures = 0;
+
+            Shader shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            if (shader == null)
+            {
+                Debug.Log("[Scene Baselines] SKIPPED: render queue — no stock shader to build a " +
+                    "material from on this render pipeline.");
+                return 0;
+            }
+
+            // In memory only: never written to the project, so no asset is created or modified.
+            var material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+            try
+            {
+                string inherited = SceneCapture.DescribeAsset(material);
+
+                failures += Held("a material that does not override its queue records that it does not",
+                    inherited.Contains("renderQueue=from-shader"));
+
+                // The heart of it: the resolved number must not reach the record at all, because
+                // that is the value which moves on its own between two runs over the same project.
+                failures += Held("the shader-resolved queue never reaches the record",
+                    !inherited.Contains("renderQueue=" + material.renderQueue));
+
+                material.renderQueue = 2500;
+                string overridden = SceneCapture.DescribeAsset(material);
+
+                failures += Held("an explicit queue override is recorded",
+                    overridden.Contains("renderQueue=2500"));
+
+                failures += Held("starting to override the queue changes the record",
+                    overridden != inherited);
+
+                BaselineComparison comparison = CompareAssetStates(inherited, overridden);
+                failures += Held("overriding the queue is one asset finding naming renderQueue",
+                    comparison.findings.Count == 1 &&
+                    comparison.findings[0].kind == RegressionKind.AssetChanged &&
+                    comparison.findings[0].changedSegments.Any(segment => segment.StartsWith("renderQueue")));
+
+                material.renderQueue = -1;
+                failures += Held("clearing the override returns the record to from-shader",
+                    SceneCapture.DescribeAsset(material).Contains("renderQueue=from-shader"));
+
+                // The upgrade itself must not become the noise. Baselines already on disk hold the
+                // resolved NUMBER, so comparing them against a capture that now records the override
+                // would accuse every material in the project at the first check after updating —
+                // exactly what this change exists to stop.
+                string asRecordedBefore = "shader=\"Probe\" renderQueue=3000";
+                string asRecordedNow = "shader=\"Probe\" renderQueue=from-shader";
+
+                failures += Held("an older baseline's assets are set aside, not compared",
+                    CompareAssetStates(asRecordedBefore, asRecordedNow,
+                        BaselineStore.AssetStateFormatSchemaVersion - 1).findings.Count == 0);
+
+                // ...and the gate must be a migration, not a mute: at the current schema the same
+                // pair is still a finding, or the section would have gone quiet for everyone.
+                failures += Held("assets recorded at the current schema still compare",
+                    CompareAssetStates(asRecordedBefore, asRecordedNow).findings.Count == 1);
+            }
+            finally
+            {
+                Object.DestroyImmediate(material);
+            }
+
+            return failures;
         }
 
         /// <summary>

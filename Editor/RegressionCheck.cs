@@ -859,6 +859,14 @@ namespace SceneBaselines
             if (!baseline.RecordsAssets || baseline.assets == null || liveAssets == null)
                 return;
 
+            // Refuse rather than compare across the asset state-format change, for the same reason
+            // objects are refused across theirs: every material recorded a resolved render queue
+            // where capture now records the stored override, so all of them would report a change
+            // nobody made. recordedAssetCount stays 0 so the report states the section was not
+            // covered instead of claiming a clean sweep over records it never read.
+            if (!baseline.AssetStateComparable)
+                return;
+
             comparison.recordedAssetCount = baseline.assets.Count;
 
             var liveMap = new Dictionary<string, string>();
@@ -1076,7 +1084,16 @@ namespace SceneBaselines
 
             // Coverage of assets is stated every time, including when it is zero, because "no
             // asset findings" and "assets were never looked at" are the same silence otherwise.
-            if (comparison.baseline?.RecordsAssets == true)
+            if (comparison.baseline?.RecordsAssets == true &&
+                comparison.baseline?.AssetStateComparable == false)
+            {
+                sb.AppendLine("   assets NOT compared — recorded in an older asset format " +
+                    $"(schema v{comparison.baseline.schemaVersion}, this tool compares " +
+                    $"v{BaselineStore.AssetStateFormatSchemaVersion}+), which stored a material's " +
+                    "render queue as the value resolved from its shader rather than the override " +
+                    "the material itself holds; re-record to restore asset coverage");
+            }
+            else if (comparison.baseline?.RecordsAssets == true)
             {
                 int unchecked_ = comparison.baseline.uncheckedAssetCount;
                 sb.AppendLine($"   covers {comparison.recordedAssetCount} referenced asset(s) by contents" +

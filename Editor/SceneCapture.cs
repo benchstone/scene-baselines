@@ -1022,6 +1022,38 @@ namespace SceneBaselines
         }
 
         /// <summary>
+        /// The material's OWN render-queue override — never the value Unity computes from the shader.
+        /// </summary>
+        /// <remarks>
+        /// Measured on BossRoom 2026-09-04, where the computed value cost 621 of 3,022 findings in a
+        /// 15-commit replay: a fifth of everything the tool said, all of it invented.
+        /// Material.renderQueue is COMPUTED — when a material does not override the queue Unity
+        /// resolves it from the shader, and that resolution depends on how far shader import has
+        /// progressed when capture runs. Two runs over an IDENTICAL tree disagreed about 46
+        /// materials while every single object matched, so the report accused commits of changes
+        /// nobody had made. A value that moves on its own cannot be evidence.
+        ///
+        /// The stored override moves only when a human moves it, which is the only queue change
+        /// worth reporting. The cost is that a shader edit which alters the shader's own queue tag
+        /// is no longer seen here — narrow, and the shader is still recorded by NAME above, so the
+        /// "everything turned pink" regression that line exists for is untouched.
+        /// </remarks>
+        private static string DescribeRenderQueue(Material material)
+        {
+            using (var serialized = new SerializedObject(material))
+            {
+                SerializedProperty custom = serialized.FindProperty("m_CustomRenderQueue");
+
+                // -1 is Unity's "inherit from the shader". Recorded as a word rather than as the
+                // resolved number so that a material which STARTS overriding its queue still reads
+                // as a change rather than coincidentally matching whatever the shader resolved to.
+                return custom == null || custom.intValue < 0
+                    ? "from-shader"
+                    : custom.intValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>
         /// A material through its SHADER's property list rather than its serialized fields.
         /// </summary>
         /// <remarks>
@@ -1043,7 +1075,7 @@ namespace SceneBaselines
 
             var sb = new System.Text.StringBuilder();
             sb.Append("shader=").Append(shader != null ? Quote(shader.name) : "none");
-            sb.Append(" renderQueue=").Append(material.renderQueue);
+            sb.Append(" renderQueue=").Append(DescribeRenderQueue(material));
 
             if (shader == null)
                 return sb.ToString();

@@ -225,6 +225,14 @@ namespace SceneBaselines
             schemaVersion >= BaselineStore.AssetSchemaVersion;
 
         /// <summary>
+        /// Whether this baseline's recorded ASSET states can be compared against freshly captured
+        /// ones. False for baselines written before the material render-queue record changed, whose
+        /// materials would otherwise all report a queue nobody touched.
+        /// </summary>
+        public bool AssetStateComparable =>
+            schemaVersion >= BaselineStore.AssetStateFormatSchemaVersion;
+
+        /// <summary>
         /// Whether this baseline recorded scene and project settings. False for older records,
         /// whose empty settings list means "never looked", not "nothing to look at".
         /// </summary>
@@ -300,7 +308,7 @@ namespace SceneBaselines
 
     public static class BaselineStore
     {
-        public const int SchemaVersion = 10;
+        public const int SchemaVersion = 11;
 
         /// <summary>
         /// The first schema that recorded capturedFromUnsavedScene. Anything older cannot report
@@ -351,6 +359,25 @@ namespace SceneBaselines
         /// which, by naming how the object was matched.
         /// </remarks>
         public const int IdentitySchemaVersion = 10;
+
+        /// <summary>
+        /// The first schema whose ASSET state strings record a material's stored render-queue
+        /// override rather than the value Unity resolves from the shader.
+        /// </summary>
+        /// <remarks>
+        /// Narrower than <see cref="StateFormatSchemaVersion"/> on purpose: object state strings are
+        /// byte-identical across this change, so objects, settings and identity all keep comparing
+        /// against an older baseline exactly as before, and only the asset section is set aside.
+        ///
+        /// It needs a version at all because the old records hold a NUMBER where the new ones hold
+        /// "from-shader", so every material in an older baseline would report a changed queue at the
+        /// first check after upgrading — the precise noise this change exists to remove. Measured on
+        /// BossRoom: the resolved value produced 621 of 3,022 findings across a 15-commit replay,
+        /// all of them invented, because it resolves differently depending on how far shader import
+        /// has progressed. Older asset records are therefore refused rather than compared, and the
+        /// report says the section was not covered instead of implying it was clean.
+        /// </remarks>
+        public const int AssetStateFormatSchemaVersion = 11;
 
         /// <summary>
         /// The first schema whose state strings record inactive objects and their active state.
