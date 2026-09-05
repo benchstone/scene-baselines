@@ -626,8 +626,7 @@ namespace SceneBaselines
 
                     if (finding.changes.Count > 0)
                     {
-                        foreach (string change in finding.changes)
-                            sb.AppendLine($"  - {Code(change)}");
+                        AppendChanges(sb, finding.changes);
                     }
                     else if (!string.Equals(finding.baselineState, finding.liveState, StringComparison.Ordinal))
                     {
@@ -643,8 +642,7 @@ namespace SceneBaselines
                     sb.AppendLine($"- **ADDED** {Code(finding.path)} — not in the baseline, and does " +
                                   "not look deliberate");
 
-                    foreach (string change in finding.changes)
-                        sb.AppendLine($"  - {Code(change)}");
+                    AppendChanges(sb, finding.changes);
 
                     continue;
                 }
@@ -658,8 +656,7 @@ namespace SceneBaselines
 
                 if (finding.changes.Count > 0)
                 {
-                    foreach (string change in finding.changes)
-                        sb.AppendLine($"  - {Code(change)}");
+                    AppendChanges(sb, finding.changes);
                 }
                 else
                 {
@@ -671,6 +668,27 @@ namespace SceneBaselines
             }
 
             sb.AppendLine();
+        }
+
+        /// <summary>
+        /// A finding's changes, capped, with the remainder counted rather than dropped.
+        /// </summary>
+        /// <remarks>
+        /// One ScriptableObject refactor reported 74 changed fields on a single asset, and a scene
+        /// whose 33 findings were otherwise unremarkable took 1,567 of a report's 2,070 lines. The
+        /// roll-up groups findings and can do nothing about the changes inside one, so the cap
+        /// belongs here — and it says how many it is not showing, because a silent cap would make
+        /// a 74-field rewrite look like an eight-field one.
+        /// </remarks>
+        private static void AppendChanges(StringBuilder sb, List<string> changes)
+        {
+            int shown = Math.Min(FindingRollup.ChangesShown, changes.Count);
+
+            for (int i = 0; i < shown; i++)
+                sb.AppendLine($"  - {Code(changes[i])}");
+
+            if (changes.Count > shown)
+                sb.AppendLine($"  - ... and {changes.Count - shown} more change(s) on this one");
         }
 
         /// <summary>

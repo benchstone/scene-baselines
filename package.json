@@ -1,6 +1,6 @@
 {
   "name": "com.benchstone.scenebaselines",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "Scene Baselines",
   "description": "Record what a Unity scene looks like when it is known-good, then detect when it stops matching. Captures component properties, inactive objects, referenced asset contents and scene/project settings, and reports what changed in terms of objects and properties instead of raw YAML. Deterministic, runs in CI, and makes no network or AI calls.",
   "unity": "2021.3",

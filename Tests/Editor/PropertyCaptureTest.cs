@@ -95,6 +95,8 @@ namespace SceneBaselines
         [Test, Order(22)] public void A_twins_children_hang_from_the_twin() => Verify(() => InASavedScene(CheckTwinChildrenHangFromTheTwin));
         [Test, Order(23)] public void Findings_group_by_cause_without_losing_any() => Verify(CheckFindingsGroupByCause);
         [Test, Order(24)] public void A_grouped_report_still_prints_every_finding() => Verify(CheckGroupedReportPrintsEveryFinding);
+        [Test, Order(25)] public void Repeated_assets_and_lost_siblings_group_too() => Verify(CheckRepetitionTheSubtreeRuleCannotReach);
+        [Test, Order(26)] public void A_long_finding_is_capped_and_says_what_it_held_back() => Verify(CheckLongFindingsAreCappedHonestly);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -301,6 +303,8 @@ namespace SceneBaselines
                 failures += InASavedScene(CheckTwinChildrenHangFromTheTwin);
                 failures += CheckFindingsGroupByCause();
                 failures += CheckGroupedReportPrintsEveryFinding();
+                failures += CheckRepetitionTheSubtreeRuleCannotReach();
+                failures += CheckLongFindingsAreCappedHonestly();
             }
             finally
             {
@@ -1660,6 +1664,174 @@ namespace SceneBaselines
                 markdown.Contains("and 2 more"));
 
             return failures;
+        }
+
+        /// <remarks>
+        /// Two shapes the first cut of the roll-up left alone, both found by READING a real report
+        /// rather than by testing it: 43 materials each printing one identical line, and 22 sibling
+        /// Imps printing one line apiece because each is the topmost missing object on its own
+        /// branch. Measured on the corpus at 632 and 36 findings respectively before they were
+        /// grouped -- the second is small, and it was the most repetitive thing on the page.
+        /// </remarks>
+        private static int CheckRepetitionTheSubtreeRuleCannotReach()
+        {
+            int failures = 0;
+
+            // One shader edit landing on every material: the shape assets actually arrive in.
+            var materials = new List<FindingRollup.Item>();
+            for (int i = 0; i < 5; i++)
+            {
+                materials.Add(RollupItem("asset-changed", "Assets/FX_" + i + ".mat",
+                    "renderQueue: 3000 -> 2000"));
+            }
+
+            failures += Held("five assets changing the same property are one group",
+                FindingRollup.Build(materials).Count == 1);
+
+            // The kind is part of the cause. One line covering both would name an event that
+            // neither a material nor a GameObject went through.
+            List<FindingRollup.Item> both = materials.Concat(ChangedItems(5, "renderQueue")).ToList();
+            failures += Held("assets and objects changing the same property stay separate groups",
+                FindingRollup.Build(both).Count == 2);
+
+            // Same-named siblings deleted together. Each is its own topmost missing object, so the
+            // subtree rule sees five roots and leaves every one of them on a line of its own.
+            var siblings = new List<FindingRollup.Item>
+            {
+                RollupItem("missing", "Level/Spawners/Imp"),
+                RollupItem("missing", "Level/Spawners/Imp#2"),
+                RollupItem("missing", "Level/Spawners/Imp#3"),
+                RollupItem("missing", "Level/Spawners/Imp#4"),
+                RollupItem("missing", "Level/Spawners/Imp#5")
+            };
+
+            List<FindingRollup.Group> siblingGroups = FindingRollup.Build(siblings);
+
+            failures += Held("five same-named siblings deleted together are one group",
+                siblingGroups.Count == 1 && siblingGroups[0].Count == 5);
+            failures += Held("the group names what they were, not the tool's own #n",
+                siblingGroups[0].Cause == "all named Imp under the same parent");
+            failures += Held("four siblings are still worth reading one by one",
+                FindingRollup.Build(siblings.Take(4).ToList()).Count == 4);
+
+            // Different parents are different deletions that happen to share a name.
+            var scattered = new List<FindingRollup.Item>
+            {
+                RollupItem("missing", "Level/A/Imp"),
+                RollupItem("missing", "Level/B/Imp"),
+                RollupItem("missing", "Level/C/Imp"),
+                RollupItem("missing", "Level/D/Imp"),
+                RollupItem("missing", "Level/E/Imp")
+            };
+            failures += Held("same-named objects under different parents are not one group",
+                FindingRollup.Build(scattered).Count == 5);
+
+            // A sibling whose own subtree went with it belongs to the subtree, which is the more
+            // specific claim. Nothing may be claimed twice, whichever rule got there first.
+            List<FindingRollup.Item> mixed = siblings
+                .Concat(new[] { RollupItem("missing", "Level/Spawners/Imp/Graphics") }).ToList();
+            List<FindingRollup.Group> mixedGroups = FindingRollup.Build(mixed);
+
+            failures += Held("every finding still lands in exactly one group",
+                mixedGroups.Sum(g => g.Count) == mixed.Count &&
+                mixedGroups.SelectMany(g => g.Members).Distinct().Count() == mixed.Count);
+
+            return failures;
+        }
+
+        /// <remarks>
+        /// The cap is the one part of this that takes lines off the page, so it is the one part
+        /// that could turn the report into a lie. A ScriptableObject refactor reported 74 changed
+        /// fields on a single asset, and a scene of 33 findings took 1,567 lines; showing eight of
+        /// those 74 silently would understate the very thing the tool exists to report. Both
+        /// renderings are asserted, because "they agree" stops being true quietly.
+        /// </remarks>
+        private static int CheckLongFindingsAreCappedHonestly()
+        {
+            int failures = 0;
+
+            const int Changes = 12;
+            int hidden = Changes - FindingRollup.ChangesShown;
+
+            var before = new System.Text.StringBuilder();
+            var after = new System.Text.StringBuilder();
+            for (int i = 0; i < Changes; i++)
+            {
+                before.Append("p").Append(i).Append("(0) ");
+                after.Append("p").Append(i).Append("(1) ");
+            }
+
+            BaselineComparison comparison = CompareObjects(
+                new List<BaselineObjectRecord> { Rec("Level/Obj", before.ToString().Trim(), "id-obj") },
+                new List<BaselineObjectRecord> { Rec("Level/Obj", after.ToString().Trim(), "id-obj") });
+
+            failures += Held("the finding still carries every change it found",
+                comparison.findings.Count == 1 &&
+                comparison.findings[0].changedSegments.Count == Changes);
+
+            string console = RegressionCheck.DescribeComparison(comparison);
+
+            failures += Held("the console prints changes up to the cap",
+                CountOccurrences(console, "p0:") == 1 &&
+                CountOccurrences(console, "p" + (FindingRollup.ChangesShown - 1) + ":") == 1);
+            failures += Held("the console does not print past the cap",
+                !console.Contains("p" + FindingRollup.ChangesShown + ":"));
+            failures += Held("the console says how many it held back",
+                console.Contains("and " + hidden + " more change(s) on this one"));
+
+            var report = new RegressionReport.Report
+            {
+                verdict = "regressions",
+                totalFindings = 1,
+                scenesChecked = 1,
+                baselinesCompared = 1
+            };
+            var scene = new RegressionReport.ReportScene
+            {
+                sceneName = "Level",
+                scenePath = "Assets/Level.unity"
+            };
+            var entry = new RegressionReport.ReportBaseline { id = "b1", verdict = "regressions" };
+            entry.findings.Add(new RegressionReport.ReportFinding
+            {
+                path = "Level/Obj",
+                kind = "changed",
+                changes = comparison.findings[0].changedSegments
+            });
+            scene.baselines.Add(entry);
+            report.scenes.Add(scene);
+
+            string markdown = RegressionReport.RenderMarkdown(report);
+
+            failures += Held("the markdown does not print past the cap",
+                !markdown.Contains("p" + FindingRollup.ChangesShown + ":"));
+            failures += Held("the markdown says how many it held back",
+                markdown.Contains("and " + hidden + " more change(s) on this one"));
+
+            // A finding that fits says nothing about holding anything back, or every ordinary
+            // report would carry a line implying there is more to see.
+            BaselineComparison whole = CompareObjects(
+                new List<BaselineObjectRecord> { Rec("Level/Obj", "p0(0) p1(0)", "id-obj") },
+                new List<BaselineObjectRecord> { Rec("Level/Obj", "p0(1) p1(1)", "id-obj") });
+
+            failures += Held("a short finding carries no held-back line",
+                !RegressionCheck.DescribeComparison(whole).Contains("more change(s)"));
+
+            return failures;
+        }
+
+        /// <summary>How many times a needle appears, for assertions that count rendered lines.</summary>
+        private static int CountOccurrences(string text, string needle)
+        {
+            int count = 0;
+
+            for (int i = text.IndexOf(needle, System.StringComparison.Ordinal); i >= 0;
+                 i = text.IndexOf(needle, i + needle.Length, System.StringComparison.Ordinal))
+            {
+                count++;
+            }
+
+            return count;
         }
 
         private static FindingRollup.Item RollupItem(string kind, string path, params string[] changes)

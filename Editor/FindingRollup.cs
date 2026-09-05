@@ -18,7 +18,17 @@ namespace SceneBaselines
     //     objects; they deleted a few subtrees and the report listed every bone in them.
     //   - 597 of 715 "changed" findings sat in clusters of 5+ that changed the SAME property set,
     //     the largest being 199 objects whose only change was "pos".
+    //   - 632 of 713 "asset-changed" findings (88.6%) sat in the same kind of cluster, which the
+    //     first cut of this file did not group at all: 43 materials with one identical line each
+    //     opened the biggest report in the corpus.
+    //   - 36 "missing" findings were same-named SIBLINGS the subtree rule cannot reach, because
+    //     each is the topmost missing object on its own branch. Small, and the single most
+    //     repetitive thing in the report it was read in: 22 consecutive lines differing by "#n".
     // Everything else is left exactly as it was, because nothing was measured to justify touching it.
+    //
+    // One thing grouping does NOT fix, so the renderers do it instead: the number of change lines
+    // UNDER a finding. 27 of 3,022 findings carried more than eight, and those 27 alone were a
+    // third of every detail line in the corpus — see ChangesShown.
     public static class FindingRollup
     {
         /// <summary>
@@ -34,6 +44,24 @@ namespace SceneBaselines
 
         /// <summary>How many members a rolled-up group names before it stops listing and counts.</summary>
         public const int MembersNamed = 3;
+
+        /// <summary>
+        /// How many change lines a single finding shows before the rest are counted instead.
+        /// </summary>
+        /// <remarks>
+        /// Eight, from the corpus, and the number is where two populations separate rather than a
+        /// preference. Capping at 8 truncates 27 of 3,022 findings (0.9%) and removes 33.5% of all
+        /// change lines; raising it to 10, 15 or even 30 still truncates 25-26 of the same findings,
+        /// because the long ones are a distinct handful — a ScriptableObject refactor reporting 74
+        /// moved fields, an array reporting element by element — and everything else is short.
+        /// Below 8 the cap starts cutting ordinary findings for very little: 5 truncates 46 and 3
+        /// truncates 148, to save 2.6 and 9 more points of length.
+        ///
+        /// The renderers print the remainder as a count. A finding that quietly showed eight of its
+        /// 74 changes would be the tool understating what it found, which is the same lie as
+        /// dropping the finding outright.
+        /// </remarks>
+        public const int ChangesShown = 8;
 
         /// <summary>
         /// One finding, reduced to what grouping needs. Callers pass indexes into their OWN list and
@@ -87,6 +115,7 @@ namespace SceneBaselines
             var owner = new Dictionary<int, Group>();
 
             RollUpLostSubtrees(items, groups, owner);
+            RollUpLostSiblings(items, groups, owner);
             RollUpSharedChanges(items, groups, owner);
 
             // Whatever no rule claimed is its own group, so the caller can render every finding by
@@ -159,6 +188,84 @@ namespace SceneBaselines
             }
         }
 
+        /// <summary>
+        /// Same-named siblings deleted together report as one line.
+        /// </summary>
+        /// <remarks>
+        /// The subtree rule cannot reach these and never will: 23 objects named Imp under one
+        /// parent are 23 separate roots, each the topmost missing object on its own branch. Their
+        /// descendants rolled up neatly beneath them while the roots themselves printed 23 nearly
+        /// identical lines — the reader saw "#2, #3, #4 ..." and learned nothing from any of them.
+        ///
+        /// Keyed on the parent and the name with the disambiguating suffix removed, because "#7" is
+        /// this tool's own bookkeeping for twins, not something the project named. Siblings under
+        /// DIFFERENT parents are left alone: those are separate deletions that happen to share a
+        /// name, and one line covering both would claim a cause that was never measured.
+        /// </remarks>
+        private static void RollUpLostSiblings(IReadOnlyList<Item> items, List<Group> groups,
+            Dictionary<int, Group> owner)
+        {
+            var clusters = new Dictionary<string, List<int>>();
+            var names = new Dictionary<string, string>();
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (owner.ContainsKey(i) || items[i].Kind != RegressionKinds.Missing)
+                    continue;
+
+                string path = items[i].Path;
+                int cut = path.LastIndexOf('/');
+                string parent = cut > 0 ? path.Substring(0, cut) : "";
+                string name = BaseName(cut >= 0 ? path.Substring(cut + 1) : path);
+
+                if (name.Length == 0)
+                    continue;
+
+                // Length-prefixed rather than joined with a separator, because a separator has to be a
+                // character no path or name can contain, and there is no such character.
+                string key = parent.Length + ":" + parent + name;
+
+                if (!clusters.TryGetValue(key, out List<int> members))
+                {
+                    clusters[key] = members = new List<int>();
+                    names[key] = name;
+                }
+
+                members.Add(i);
+            }
+
+            foreach (KeyValuePair<string, List<int>> cluster in clusters)
+            {
+                if (cluster.Value.Count < SameChangeThreshold)
+                    continue;
+
+                var group = new Group();
+                group.Members.AddRange(cluster.Value);
+                group.Cause = $"all named {names[cluster.Key]} under the same parent";
+
+                foreach (int index in cluster.Value)
+                    owner[index] = group;
+
+                groups.Add(group);
+            }
+        }
+
+        /// <summary>An object's name without the "#n" this tool appends to tell twins apart.</summary>
+        private static string BaseName(string name)
+        {
+            int hash = name.LastIndexOf('#');
+            if (hash <= 0 || hash == name.Length - 1)
+                return name;
+
+            for (int i = hash + 1; i < name.Length; i++)
+            {
+                if (!char.IsDigit(name[i]))
+                    return name;
+            }
+
+            return name.Substring(0, hash);
+        }
+
         /// <summary>The highest missing object this path hangs from, or its own index when it is the root.</summary>
         private static int TopmostMissingAncestor(string path, Dictionary<string, int> missingAt)
         {
@@ -177,17 +284,25 @@ namespace SceneBaselines
         }
 
         /// <summary>
-        /// Objects that changed the same thing report as one line naming the thing.
+        /// Objects and assets that changed the same thing report as one line naming the thing.
         /// </summary>
         /// <remarks>
         /// Keyed on the SET of changed property names rather than their values, because the reader's
         /// question is "what happened", and 199 objects that each moved to a different position had
         /// one thing happen to them. The values are still there on the members.
+        ///
+        /// Assets cluster the same way and were missed on the first cut: one shader edit, one
+        /// re-import or one upgraded material property lands on every material at once, and 43 of
+        /// them each printing an identical line was the first thing a reader met in the biggest
+        /// report in the corpus. The KIND is part of the key, though — a material whose renderQueue
+        /// moved and a GameObject whose renderQueue moved are two different events, and one line
+        /// claiming both would name a cause that fits neither.
         /// </remarks>
         private static void RollUpSharedChanges(IReadOnlyList<Item> items, List<Group> groups,
             Dictionary<int, Group> owner)
         {
             var clusters = new Dictionary<string, List<int>>();
+            var causes = new Dictionary<string, string>();
 
             for (int i = 0; i < items.Count; i++)
             {
@@ -195,12 +310,17 @@ namespace SceneBaselines
                     continue;
 
                 Item item = items[i];
-                if (item.Kind != RegressionKinds.Changed || item.ChangeKeys.Count == 0)
+                if (!GroupsByChange(item.Kind) || item.ChangeKeys.Count == 0)
                     continue;
 
-                string key = ChangeSetKey(item.ChangeKeys);
+                string changed = ChangeSetKey(item.ChangeKeys);
+                string key = item.Kind.Length + ":" + item.Kind + changed;
+
                 if (!clusters.TryGetValue(key, out List<int> members))
+                {
                     clusters[key] = members = new List<int>();
+                    causes[key] = changed;
+                }
 
                 members.Add(i);
             }
@@ -212,13 +332,26 @@ namespace SceneBaselines
 
                 var group = new Group();
                 group.Members.AddRange(cluster.Value);
-                group.Cause = "all changed " + cluster.Key;
+                group.Cause = "all changed " + causes[cluster.Key];
 
                 foreach (int index in cluster.Value)
                     owner[index] = group;
 
                 groups.Add(group);
             }
+        }
+
+        /// <summary>
+        /// Whether a kind's findings are worth clustering by what they changed.
+        /// </summary>
+        /// <remarks>
+        /// Objects and assets, measured. Not settings: 27 of them across the whole corpus, one line
+        /// each, and nothing to gain. Not missing, moved or added — those have their own shape and
+        /// no measurement asked for this.
+        /// </remarks>
+        private static bool GroupsByChange(string kind)
+        {
+            return kind == RegressionKinds.Changed || kind == RegressionKinds.AssetChanged;
         }
 
         /// <summary>The changed property names, deduplicated and ordered, as one comparable string.</summary>
@@ -268,5 +401,6 @@ namespace SceneBaselines
     {
         public const string Missing = "missing";
         public const string Changed = "changed";
+        public const string AssetChanged = "asset-changed";
     }
 }

@@ -1180,8 +1180,7 @@ namespace SceneBaselines
 
                     if (finding.changedSegments.Count > 0)
                     {
-                        foreach (string segment in finding.changedSegments)
-                            sb.AppendLine($"              {segment}");
+                        AppendChanges(sb, finding.changedSegments);
                     }
                     else if (!string.Equals(finding.baselineState, finding.liveState,
                                  StringComparison.Ordinal))
@@ -1220,8 +1219,7 @@ namespace SceneBaselines
                 }
                 if (finding.changedSegments.Count > 0)
                 {
-                    foreach (string segment in finding.changedSegments)
-                        sb.AppendLine($"              {segment}");
+                    AppendChanges(sb, finding.changedSegments);
                 }
                 else
                 {
@@ -1249,6 +1247,25 @@ namespace SceneBaselines
             }
 
             return FindingRollup.Build(items);
+        }
+
+        /// <summary>
+        /// A finding's changes, capped, with the remainder counted rather than dropped.
+        /// </summary>
+        /// <remarks>
+        /// The console report is read in a scrolling log where 74 lines under one asset push the
+        /// rest of the run off the screen. Same cap and same wording as the markdown report, from
+        /// the one constant, so a reader comparing the two is never told two different stories.
+        /// </remarks>
+        private static void AppendChanges(System.Text.StringBuilder sb, List<string> changes)
+        {
+            int shown = Math.Min(FindingRollup.ChangesShown, changes.Count);
+
+            for (int i = 0; i < shown; i++)
+                sb.AppendLine($"              {changes[i]}");
+
+            if (changes.Count > shown)
+                sb.AppendLine($"              ... and {changes.Count - shown} more change(s) on this one");
         }
 
         /// <summary>

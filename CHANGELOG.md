@@ -4,6 +4,32 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-09-05
+
+### Changed
+
+- A finding shows at most eight changed properties and then states how many more it
+  found. One asset in a real project reported 74 rewritten fields, and a scene whose 33
+  findings were otherwise unremarkable took 1,567 of a report's 2,070 lines. Measured
+  over a 15-commit replay: 27 of 3,022 findings carry more than eight changes, and those
+  27 alone are a third of every change line produced.
+
+- Asset findings that changed the same properties report as one line naming them, which
+  object findings already did. One shader edit or re-import lands on every material at
+  once, so 43 identical lines could open a report; 632 of 713 asset findings in the
+  replay sat in clusters of five or more. A finding's kind is part of what the line
+  claims, so a material and a GameObject that changed the same property are never
+  reported as one event.
+
+- Objects with the same name deleted from the same parent report as one line. Each is
+  the topmost missing object on its own branch, so the existing subtree rule could not
+  reach them: 23 objects named Imp under one parent printed 23 near-identical lines
+  while their descendants were correctly rolled up beneath them.
+
+Together these render a report of 1,736 findings in 543 lines instead of 3,878. Every
+count and verdict is unchanged: grouping and the cap are presentation, never filtering,
+the true total still prints before the groups, and the cap states what it held back.
+
 ## [0.2.0] — 2026-09-05
 
 ### Fixed
