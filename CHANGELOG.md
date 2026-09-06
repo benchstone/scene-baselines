@@ -39,18 +39,39 @@ All notable changes to this package are documented here. The format follows
   that no longer resolves, most often — the report says it cannot replay past that
   commit, instead of reporting a project that produced no scene as a mass deletion.
 
+- **A replay opens only the commits that could have changed the scenes.** `--commits 10` counts
+  commits worth replaying rather than a distance back through history: a commit that touched
+  nothing any of the scenes depends on cannot have changed how they look, so it is skipped without
+  launching an editor. Depth was never the thing that made a replay expensive — a commit costs the
+  same whether there are twenty behind it or two hundred thousand — but on a real project most
+  commits have nothing to do with any given scene, and each one still cost a full editor launch to
+  prove it.
+
+  What counts as a dependency is what Unity reports for the scenes: the scene files, and the
+  prefabs, materials, ScriptableObjects and scripts they reference, plus the `.meta` file of each.
+  Deliberately not "commits that touched a scene file", which would skip exactly the regressions
+  this tool exists to catch — the ones that arrive through a prefab, where the scene's own diff is
+  empty.
+
+  Each commit is still compared with its own parent, so a finding belongs to one commit and never
+  to a range. Two limits, both stated at the top of every report that used the filter: the
+  dependency list is read at the commit the run starts from, so a file the scenes no longer
+  reference is not noticed; and merge commits are not replayed, because git attributes their
+  changes to the commits they merge, which are. `--scan <n>` bounds how far back to look
+  (500 commits by default), and `--all-commits` replays every commit regardless.
+
 ### Changed
 
-- **A replay does not compare project-wide settings**, and says so twice: once in the
-  report header, and once in each commit's section, naming how many findings it set
-  aside. This is the only filtering anything in this package does. Unity reads project
-  settings once per session rather than importing them like assets, so after a checkout
-  the editor's tags, layers and physics can still be a commit nobody asked about: a
-  commit that touched only `README.md` reported two tag findings for a tag that exists in
-  no commit being replayed. Scene-scope settings still compare, because they live in the
-  scene file, which Unity does re-import. An ordinary check is untouched — there the
-  editor's view and the working tree are the same thing, which is exactly the assumption
-  a replay breaks.
+- **A replay does not compare project-wide settings**, and says so twice: once in the report
+  header, and once in each commit's section, naming how many findings it set aside. It is
+  the only place anything in this package drops a finding — choosing which commits to replay
+  decides what gets compared, never what a comparison reports. Unity reads project settings
+  once per session rather than importing them like assets, so after a checkout the editor's
+  tags, layers and physics can still be a commit nobody asked about: a commit that touched
+  only `README.md` reported two tag findings for a tag that exists in no commit being
+  replayed. Scene-scope settings still compare, because they live in the scene file, which
+  Unity does re-import. An ordinary check is untouched — there the editor's view and the
+  working tree are the same thing, which is exactly the assumption a replay breaks.
 
 - Each pair of commits in a replay records into its own baseline folder. Sharing one
   folder let a baseline outlive the commit it described, so a finding was re-reported at

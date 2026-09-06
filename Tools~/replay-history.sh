@@ -10,12 +10,19 @@
 # Usage:
 #   replay-history.sh --project <path> --unity <path/to/Unity> [--commits 10]
 #                     [--scene Assets/Foo.unity]... [--out <dir>] [--baselines <dir>]
+#                     [--scan 500] [--all-commits]
+#
+# --commits counts commits worth replaying, not commits back: one that changed nothing these scenes
+# depend on cannot have changed how they look, and is never opened. --scan bounds how far back the
+# editor may look for them, and --all-commits replays every commit instead.
 #
 # The report, the baselines and the run's state file all live outside the inspected project.
 
 set -u
 
 COMMITS=10
+SCAN=""
+FILTER=""
 SCENES=()
 PROJECT=""
 UNITY=""
@@ -30,12 +37,15 @@ while [ $# -gt 0 ]; do
     --scene)     SCENES+=("$2"); shift 2 ;;
     --out)       OUT="$2"; shift 2 ;;
     --baselines) BASELINES="$2"; shift 2 ;;
+    --scan)      SCAN="$2"; shift 2 ;;
+    --all-commits) FILTER="off"; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 if [ -z "$PROJECT" ] || [ -z "$UNITY" ]; then
-  echo "usage: $0 --project <path> --unity <path/to/Unity> [--commits n] [--scene path]... [--out dir]" >&2
+  echo "usage: $0 --project <path> --unity <path/to/Unity> [--commits n] [--scene path]..." >&2
+  echo "       [--out dir] [--baselines dir] [--scan n] [--all-commits]" >&2
   exit 2
 fi
 
@@ -51,6 +61,13 @@ SCENE_ARGS=()
 for scene in ${SCENES+"${SCENES[@]}"}; do
   SCENE_ARGS+=(-replayScene "$scene")
 done
+
+# Only commits that changed something the scenes depend on are replayed, so --commits counts
+# commits worth opening rather than a distance back through history, and --scan bounds how far the
+# editor may look to find them. --all-commits turns the choosing off.
+CHOICE_ARGS=()
+[ -n "$SCAN" ]   && CHOICE_ARGS+=(-replayScan "$SCAN")
+[ -n "$FILTER" ] && CHOICE_ARGS+=(-replayFilter "$FILTER")
 
 # The way back, read before anything moves. The editor records it too and asks for it as the last
 # checkout of the run; this is the belt to that pair of braces, for a run killed halfway.
@@ -77,6 +94,7 @@ while : ; do
     -replayState "$STATE" \
     -replayCommits "$COMMITS" \
     ${SCENE_ARGS+"${SCENE_ARGS[@]}"} \
+    ${CHOICE_ARGS+"${CHOICE_ARGS[@]}"} \
     -baselineDir "$BASELINES" \
     -reportDir "$OUT" \
     -logFile "$LOG"

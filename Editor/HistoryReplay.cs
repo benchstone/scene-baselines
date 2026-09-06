@@ -49,6 +49,15 @@ namespace SceneBaselines
         /// </remarks>
         public const int DefaultCommitCount = 10;
 
+        /// <summary>How far back the planner looks for those commits.</summary>
+        /// <remarks>
+        /// Only commits that changed something the scenes depend on are replayed, so the planner
+        /// has to read further back than it reports. This bounds that reading: on a project where
+        /// the scenes are touched rarely, a run says how far it looked and finds what it found,
+        /// rather than walking a hundred thousand commits to fill a quota nobody asked for.
+        /// </remarks>
+        public const int DefaultScanDepth = 500;
+
         /// <summary>Nothing left to do; the driver stops.</summary>
         public const int ExitComplete = 0;
 
@@ -75,10 +84,23 @@ namespace SceneBaselines
             public string restoreRef;
             public bool restoreIsBranch;
 
-            /// <summary>Commits to replay, newest first. Pair i is (commits[i], commits[i + 1]).</summary>
+            /// <summary>Commits to replay, newest first. Commit i is compared with parents[i].</summary>
+            /// <remarks>
+            /// Deliberately NOT assumed to be adjacent to one another. With the dependency filter
+            /// on, the commits in between changed nothing these scenes depend on and are never
+            /// opened at all — but each commit here is still compared with its OWN parent, so a
+            /// finding belongs to one commit rather than to a range nobody can pick apart.
+            /// </remarks>
             public List<string> commits = new List<string>();
+            public List<string> parents = new List<string>();
             public List<string> subjects = new List<string>();
             public List<string> scenes = new List<string>();
+
+            /// <summary>How the commits were chosen. The report states all of it.</summary>
+            public bool filtered;
+            public int scanned;
+            public int skipped;
+            public int closureSize;
 
             /// <summary>Which pair is being worked on.</summary>
             public int index;
@@ -233,28 +255,69 @@ namespace SceneBaselines
                 return null;
             }
 
-            // n commits to report needs n + 1 revisions, because each is compared with its parent.
-            string log = Git($"log --format=%H%x1f%s -n {Math.Max(2, count + 1)} HEAD", out _);
+            if (count < 1)
+            {
+                Debug.LogError($"{LogPrefix} -replayCommits must be at least 1, got {count}.");
+                return null;
+            }
+
+            int scan = DefaultScanDepth;
+            string depth = ArgumentValue("-replayScan");
+            if (!string.IsNullOrEmpty(depth) && !int.TryParse(depth, out scan))
+            {
+                Debug.LogError($"{LogPrefix} -replayScan must be a number, got '{depth}'.");
+                return null;
+            }
+
+            plan.filtered = !string.Equals(ArgumentValue("-replayFilter"), "off",
+                StringComparison.OrdinalIgnoreCase);
+
+            HashSet<string> closure = null;
+            if (plan.filtered)
+            {
+                closure = DependencyClosure(plan.scenes);
+                plan.closureSize = closure.Count;
+            }
+
+            // %P is the parent list, and reading it here rather than asking git once per commit is
+            // what lets the plan skip commits without losing track of what each one is compared
+            // with. --name-only over the scan window is the expensive half of planning, and it is
+            // paid ONCE: filtering with a git pathspec instead would put the whole dependency list
+            // on a command line, which a real project overflows.
+            string format = "--format=%x01%H%x1f%P%x1f%s";
+            string log = plan.filtered
+                ? Git($"-c core.quotepath=false log {format} --name-only -n {scan} HEAD", out _)
+                : Git($"log {format} -n {Math.Max(1, count)} HEAD", out _);
+
             if (string.IsNullOrEmpty(log))
             {
                 Debug.LogError($"{LogPrefix} Not starting a replay: could not read the commit log.");
                 return null;
             }
 
-            foreach (string line in log.Split('\n'))
-            {
-                string trimmed = line.Trim();
-                if (trimmed.Length == 0)
-                    continue;
+            int scanned, skipped;
+            List<CommitRecord> chosen = SelectCommits(ParseLog(log), closure, count, out scanned, out skipped);
 
-                string[] parts = trimmed.Split('\u001f');
-                plan.commits.Add(parts[0]);
-                plan.subjects.Add(parts.Length > 1 ? parts[1] : "");
+            plan.scanned = scanned;
+            plan.skipped = skipped;
+
+            foreach (CommitRecord record in chosen)
+            {
+                plan.commits.Add(record.sha);
+                plan.parents.Add(record.parent);
+                plan.subjects.Add(record.subject);
             }
 
-            if (plan.commits.Count < 2)
+            if (plan.commits.Count == 0)
             {
-                Debug.LogError($"{LogPrefix} Not starting a replay: history has fewer than two commits.");
+                // Nothing to look at is not the same as something being broken, and the reader's
+                // first guess will be the second one, so both ways out are named here.
+                Debug.LogError($"{LogPrefix} Not starting a replay: none of the last {scanned} commit(s) " +
+                               (plan.filtered
+                                   ? $"changed any of the {plan.closureSize} file(s) these scene(s) depend on. " +
+                                     "Look further back with -replayScan <n>, or replay every commit with " +
+                                     "-replayFilter off."
+                                   : "has a parent to be compared with."));
                 return null;
             }
 
@@ -274,13 +337,20 @@ namespace SceneBaselines
             BackUpMachineWrittenFiles(plan, machineWritten);
             BeginReport(plan);
 
-            // The first thing the driver must do: put the tree on the older half of the newest pair,
-            // so the newest commit has a known-good state to be compared against.
-            plan.nextCheckout = plan.commits[1];
+            // The first thing the driver must do: put the tree on the parent of the newest commit,
+            // so that commit has a known-good state to be compared against.
+            plan.nextCheckout = plan.parents[0];
 
-            Debug.Log($"{LogPrefix} Replaying {plan.commits.Count - 1} commit(s) over {plan.scenes.Count} " +
+            Debug.Log($"{LogPrefix} Replaying {plan.commits.Count} commit(s) over {plan.scenes.Count} " +
                       $"scene(s), newest first. Returning to '{plan.restoreRef}' at the end. " +
                       $"Report: {plan.reportPath}");
+
+            if (plan.filtered)
+            {
+                Debug.Log($"{LogPrefix} Of the last {plan.scanned} commit(s), {plan.skipped} changed nothing " +
+                          $"these scene(s) depend on and will not be opened. The dependency list holds " +
+                          $"{plan.closureSize} file(s).");
+            }
 
             return plan;
         }
@@ -288,14 +358,14 @@ namespace SceneBaselines
         /// <summary>Does the one thing this launch is for. False means the run cannot continue.</summary>
         private static bool Step(Plan plan)
         {
-            if (plan.index + 1 >= plan.commits.Count)
+            if (plan.index >= plan.commits.Count)
             {
                 Complete(plan, "finished");
                 return true;
             }
 
             string child = plan.commits[plan.index];
-            string parent = plan.commits[plan.index + 1];
+            string parent = plan.parents[plan.index];
             string expected = plan.recorded ? child : parent;
 
             // The driver owns checkouts, so a mismatch means the two have lost track of each other.
@@ -341,10 +411,10 @@ namespace SceneBaselines
             plan.index++;
             plan.recorded = false;
 
-            if (plan.index + 1 >= plan.commits.Count)
+            if (plan.index >= plan.commits.Count)
                 Complete(plan, "finished");
             else
-                plan.nextCheckout = plan.commits[plan.index + 1];
+                plan.nextCheckout = plan.parents[plan.index];
 
             return true;
         }
@@ -430,7 +500,7 @@ namespace SceneBaselines
             // Streamed, not saved for the end: the number that decides whether this is usable is
             // time to the FIRST finding, and a reader watching a console learns nothing from a run
             // that stays silent until it is done.
-            Debug.Log($"{LogPrefix} Replay {plan.commitsReported}/{plan.commits.Count - 1}: " +
+            Debug.Log($"{LogPrefix} Replay {plan.commitsReported}/{plan.commits.Count}: " +
                       $"{Short(child)} {subject} — {report.totalFindings} finding(s).");
 
             var section = new StringBuilder();
@@ -542,6 +612,192 @@ namespace SceneBaselines
             }
 
             return removed;
+        }
+
+        // ── Choosing the commits ─────────────────────────────────────────────────
+
+        /// <summary>One commit as the planner reads it: what it is, what it came from, what it touched.</summary>
+        public class CommitRecord
+        {
+            public string sha;
+            public string parent;
+            public string subject;
+            public List<string> files = new List<string>();
+        }
+
+        /// <summary>
+        /// Every file the given scenes depend on, spelled the way git spells paths.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not "the scene files". A scene's own diff is empty for the regressions this
+        /// tool exists to catch — the prefab that moved, the material whose queue changed — so
+        /// choosing commits by whether they touched a scene file would hide precisely the findings
+        /// worth having. What a scene depends on is the smallest set that cannot hide one.
+        ///
+        /// .meta files are added on top: they are not dependencies, but import settings live in
+        /// them and import settings change what a capture sees. Paths outside the repository
+        /// (built-in resources, registry packages) stay in the set and simply never match anything
+        /// git reports, which costs a string comparison and no correctness.
+        /// </remarks>
+        internal static HashSet<string> DependencyClosure(List<string> scenes)
+        {
+            var closure = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string prefix = RepositoryPrefix();
+
+            foreach (string scene in scenes)
+                AddToClosure(closure, prefix, scene);
+
+            foreach (string dependency in AssetDatabase.GetDependencies(scenes.ToArray(), true))
+                AddToClosure(closure, prefix, dependency);
+
+            return closure;
+        }
+
+        private static void AddToClosure(HashSet<string> closure, string prefix, string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return;
+
+            string spelled = prefix + path.Replace('\\', '/');
+            closure.Add(spelled);
+            closure.Add(spelled + ".meta");
+        }
+
+        /// <summary>
+        /// What git puts in front of a project path when the project is not the repository root.
+        /// </summary>
+        /// <remarks>
+        /// A Unity project is often a subdirectory of the repository holding it, and git reports
+        /// paths from the repository root. Comparing "Assets/Foo.prefab" against
+        /// "game/Assets/Foo.prefab" matches nothing, and matching nothing does not look like a
+        /// failure here — it looks like a history in which no commit ever touched the scenes. The
+        /// filter would quietly skip everything, so this is worth getting right.
+        /// </remarks>
+        private static string RepositoryPrefix()
+        {
+            string top = Git("rev-parse --show-toplevel", out _);
+            if (string.IsNullOrEmpty(top))
+                return "";
+
+            string root = Path.GetFullPath(top.Trim()).Replace('\\', '/').TrimEnd('/');
+            string project = Path.GetFullPath(ProjectRoot()).Replace('\\', '/').TrimEnd('/');
+
+            if (project.Length <= root.Length ||
+                !project.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                return "";
+            }
+
+            return project.Substring(root.Length).Trim('/') + "/";
+        }
+
+        /// <summary>Reads `log --format=%x01%H%x1f%P%x1f%s --name-only` into records.</summary>
+        /// <remarks>
+        /// Records start with U+0001 rather than being split on blank lines, so a subject can hold
+        /// anything at all, and a commit that lists no files stays a record rather than becoming a
+        /// gap between two others.
+        /// </remarks>
+        internal static List<CommitRecord> ParseLog(string log)
+        {
+            var records = new List<CommitRecord>();
+
+            if (string.IsNullOrEmpty(log))
+                return records;
+
+            foreach (string chunk in log.Split('\u0001'))
+            {
+                if (chunk.Trim().Length == 0)
+                    continue;
+
+                string[] lines = chunk.Split('\n');
+                string[] head = lines[0].TrimEnd('\r').Split('\u001f');
+
+                var record = new CommitRecord
+                {
+                    sha = head[0].Trim(),
+                    parent = head.Length > 1 ? FirstParent(head[1]) : null,
+                    subject = head.Length > 2 ? head[2].Trim() : ""
+                };
+
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    string file = lines[i].TrimEnd('\r').Trim();
+                    if (file.Length > 0)
+                        record.files.Add(file);
+                }
+
+                if (record.sha.Length > 0)
+                    records.Add(record);
+            }
+
+            return records;
+        }
+
+        private static string FirstParent(string parents)
+        {
+            string[] shas = parents.Trim().Split(' ');
+            return shas.Length > 0 && shas[0].Length > 0 ? shas[0] : null;
+        }
+
+        /// <summary>
+        /// Picks the commits worth launching an editor for, newest first.
+        /// </summary>
+        /// <remarks>
+        /// A pure function of what git said, so that which commits get replayed can be tested
+        /// without a repository to replay. A null closure takes commits as they come.
+        ///
+        /// The bar for skipping a commit is that it CANNOT have changed how the scenes look, never
+        /// that it seems unlikely to have. Two consequences worth stating: a path git had to quote
+        /// is unreadable here, so that commit is kept rather than judged; and a merge lists no
+        /// files of its own, so it is skipped while the commits it merged — which are in this same
+        /// walk — are not. Skipping a real finding to save a minute is the wrong trade for a tool
+        /// whose entire claim is that it does not miss things.
+        /// </remarks>
+        internal static List<CommitRecord> SelectCommits(List<CommitRecord> records,
+            HashSet<string> closure, int count, out int scanned, out int skipped)
+        {
+            var chosen = new List<CommitRecord>();
+
+            scanned = 0;
+            skipped = 0;
+
+            foreach (CommitRecord record in records)
+            {
+                if (chosen.Count >= count)
+                    break;
+
+                scanned++;
+
+                // The first commit in a repository has nothing to be compared against.
+                if (string.IsNullOrEmpty(record.parent))
+                    continue;
+
+                if (closure != null && !Touches(record, closure))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                chosen.Add(record);
+            }
+
+            return chosen;
+        }
+
+        private static bool Touches(CommitRecord record, HashSet<string> closure)
+        {
+            foreach (string file in record.files)
+            {
+                // git quotes a path it had to escape. Rather than guess what it spells, keep the
+                // commit: a needless replay costs a minute, a wrongly skipped one costs a finding.
+                if (file.StartsWith("\"", StringComparison.Ordinal))
+                    return true;
+
+                if (closure.Contains(file))
+                    return true;
+            }
+
+            return false;
         }
 
         // ── Refusing to destroy things ───────────────────────────────────────────
@@ -755,6 +1011,10 @@ namespace SceneBaselines
         /// Deliberately NOT the scenes a commit touched. The finding this feature exists to show is
         /// the one that arrives through a prefab or an asset, where the scene file itself is
         /// untouched and its own diff is empty; filtering by touched scenes would hide exactly that.
+        ///
+        /// Which is not the same thing as replaying every commit: <see cref="DependencyClosure"/>
+        /// skips commits that touched nothing any of these scenes REFERS to, and the prefab in that
+        /// example is referred to. Every scene, and every commit that could have changed one.
         /// </remarks>
         private static List<string> AllScenes()
         {
@@ -798,10 +1058,32 @@ namespace SceneBaselines
             var header = new StringBuilder();
             header.AppendLine("# History replay");
             header.AppendLine();
-            header.AppendLine($"Replaying {plan.commits.Count - 1} commit(s) over {plan.scenes.Count} scene(s), " +
+            header.AppendLine($"Replaying {plan.commits.Count} commit(s) over {plan.scenes.Count} scene(s), " +
                               "newest first. Each commit is compared against its own parent: the parent is " +
                               "captured as known-good, then the commit is checked against it.");
             header.AppendLine();
+
+            // Said at the top because it decides what the whole page means: a reader who thinks
+            // these are the last N commits will read "no findings" as "nothing happened in the last
+            // N commits", which is a different and much stronger claim than the one being made.
+            if (plan.filtered)
+            {
+                header.AppendLine($"**Chosen from the last {plan.scanned} commit(s).** {plan.skipped} of them " +
+                                  $"changed none of the {plan.closureSize} file(s) these scene(s) depend on, so " +
+                                  "they cannot have changed what the scenes look like and were never opened. " +
+                                  "The dependencies are the ones Unity reports for these scenes — the scene " +
+                                  "files, and the prefabs, materials, ScriptableObjects and scripts they " +
+                                  "reference, plus the .meta file of each. That is why a commit that never " +
+                                  "touched a scene file can still appear here: the regressions worth catching " +
+                                  "arrive through a prefab, where the scene's own diff is empty.");
+                header.AppendLine();
+                header.AppendLine("> Two limits of choosing them that way. The dependency list is read at the " +
+                                  "commit this run started from, so a file the scenes used to reference and no " +
+                                  "longer do is not noticed. And merge commits are not replayed: git attributes " +
+                                  "their changes to the commits they merge, which are replayed instead. Pass " +
+                                  "`-replayFilter off` to replay every commit regardless.");
+                header.AppendLine();
+            }
             header.AppendLine("> These are findings this tool WOULD have reported at the time. Objects added " +
                               "since a baseline are not regressions, and this checks scene state, not runtime " +
                               "behaviour.");
@@ -830,7 +1112,7 @@ namespace SceneBaselines
             tail.AppendLine();
             tail.AppendLine("---");
             tail.AppendLine();
-            tail.AppendLine($"Replay {reason}: {plan.commitsReported} of {plan.commits.Count - 1} commit(s) " +
+            tail.AppendLine($"Replay {reason}: {plan.commitsReported} of {plan.commits.Count} commit(s) " +
                             $"reported, {plan.findings} finding(s) in total.");
 
             try

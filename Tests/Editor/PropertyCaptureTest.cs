@@ -98,16 +98,17 @@ namespace SceneBaselines
         [Test, Order(25)] public void Repeated_assets_and_lost_siblings_group_too() => Verify(CheckRepetitionTheSubtreeRuleCannotReach);
         [Test, Order(26)] public void A_long_finding_is_capped_and_says_what_it_held_back() => Verify(CheckLongFindingsAreCappedHonestly);
         [Test, Order(27)] public void A_replay_sets_aside_only_project_settings() => Verify(CheckReplaySetsAsideOnlyProjectSettings);
+        [Test, Order(28)] public void Commits_are_chosen_by_what_the_scenes_depend_on() => Verify(CheckCommitsAreChosenByWhatTheScenesDependOn);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
-        // Three groups need a real, SAVED scene. The additive-scene group cannot even start without
+        // Four groups need a real, SAVED scene. The additive-scene group cannot even start without
         // one, because Unity refuses to add a scene alongside one that has never been saved; the
         // root-order group has nothing to describe in an empty scene; and the reopen group has
         // nothing to reopen.
         //
         // That used to mean they were SKIPPED under the Test Runner, which opens a fresh untitled
-        // scene for the run — so the menu covered them and CI did not. Three of nineteen groups, and
+        // scene for the run — so the menu covered them and CI did not. Four of twenty-seven groups, and
         // among them the one guarding the determinism defect found on 2026-09-01, which is exactly
         // the property CI exists to hold. A test that only runs when a human remembers to click a
         // menu is not a guarantee.
@@ -307,6 +308,7 @@ namespace SceneBaselines
                 failures += CheckRepetitionTheSubtreeRuleCannotReach();
                 failures += CheckLongFindingsAreCappedHonestly();
                 failures += CheckReplaySetsAsideOnlyProjectSettings();
+                failures += CheckCommitsAreChosenByWhatTheScenesDependOn();
             }
             finally
             {
@@ -1942,6 +1944,155 @@ namespace SceneBaselines
         private static RegressionReport.ReportFinding Finding(string kind, string path)
         {
             return new RegressionReport.ReportFinding { kind = kind, path = path };
+        }
+
+        /// <remarks>
+        /// Which commits get replayed is the difference between a tool that works on a toy project
+        /// and one that works on a real repository, where the scenes are touched rarely and most
+        /// commits cannot have changed them at all. The two possible mistakes are not symmetric:
+        /// replaying a commit that changed nothing costs a minute, while skipping one that did
+        /// costs a finding, silently, in the one place a reader will never think to look. Every
+        /// rule asserted here bends the same way for that reason.
+        ///
+        /// The case that matters most is the commit that touches a PREFAB and no scene file at all:
+        /// the scene's own diff is empty, and catching it anyway is the entire point of the tool.
+        /// </remarks>
+        private static int CheckCommitsAreChosenByWhatTheScenesDependOn()
+        {
+            int failures = 0;
+
+            const string Record = "\u0001";
+            const string Field = "\u001f";
+
+            // Exactly what `log --format=%x01%H%x1f%P%x1f%s --name-only` hands back.
+            string log =
+                Record + "aaaa1111" + Field + "pppp1111" + Field + "Tidy up the docs\n" +
+                "Docs/README.md\n" +
+                "Docs/images/logo.png\n" +
+                Record + "bbbb2222" + Field + "pppp2222" + Field + "Nudge the enemy prefab\n" +
+                "Assets/Prefabs/Enemy.prefab\n" +
+                Record + "cccc3333" + Field + "dddd4444 eeee5555" + Field + "Merge branch 'art'\n" +
+                Record + "dddd4444" + Field + "pppp4444" + Field + "Re-import the prefab\n" +
+                "Assets/Prefabs/Enemy.prefab.meta\n" +
+                Record + "eeee5555" + Field + "pppp5555" + Field + "Rename a level\n" +
+                "\"Assets/Sc\\303\\250nes/Level.unity\"\n" +
+                Record + "ffff6666" + Field + Field + "The first commit\n" +
+                "Assets/Level.unity\n";
+
+            List<HistoryReplay.CommitRecord> records = InvokeParseLog(log);
+            if (records == null)
+                return 1;
+
+            failures += Held("every commit is read, including one that lists no files",
+                records.Count == 6);
+
+            failures += Held("a merge is compared against its FIRST parent",
+                records.Count > 2 && records[2].parent == "dddd4444");
+
+            failures += Held("a merge lists no files of its own",
+                records.Count > 2 && records[2].files.Count == 0);
+
+            failures += Held("the first commit in a repository has no parent",
+                records.Count > 5 && string.IsNullOrEmpty(records[5].parent));
+
+            failures += Held("a subject survives being read",
+                records.Count > 1 && records[1].subject == "Nudge the enemy prefab");
+
+            var closure = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+            {
+                "Assets/Level.unity",
+                "Assets/Level.unity.meta",
+                "Assets/Prefabs/Enemy.prefab",
+                "Assets/Prefabs/Enemy.prefab.meta"
+            };
+
+            int scanned, skipped;
+            List<HistoryReplay.CommitRecord> chosen =
+                InvokeSelectCommits(records, closure, 10, out scanned, out skipped);
+
+            if (chosen == null)
+                return failures + 1;
+
+            failures += Held("a commit that touched only docs is not replayed",
+                chosen.All(c => c.sha != "aaaa1111"));
+
+            // The feature, in one assertion.
+            failures += Held("a commit that touched a PREFAB is replayed, though no scene file changed",
+                chosen.Any(c => c.sha == "bbbb2222"));
+
+            failures += Held("a commit that touched only a .meta is replayed -- import settings " +
+                             "change what a capture sees",
+                chosen.Any(c => c.sha == "dddd4444"));
+
+            failures += Held("a path git had to quote keeps its commit rather than risking a finding",
+                chosen.Any(c => c.sha == "eeee5555"));
+
+            failures += Held("a merge is not replayed -- the commits it merged are in the same walk",
+                chosen.All(c => c.sha != "cccc3333"));
+
+            failures += Held("the first commit in a repository is not replayed -- nothing to compare with",
+                chosen.All(c => c.sha != "ffff6666"));
+
+            failures += Held("the counts say what happened: six looked at, two set aside, three chosen",
+                scanned == 6 && skipped == 2 && chosen.Count == 3);
+
+            failures += Held("the commits stay newest first",
+                chosen.Count == 3 && chosen[0].sha == "bbbb2222" && chosen[2].sha == "eeee5555");
+
+            // Stopping early is the whole reason the scan window is safe to make large.
+            chosen = InvokeSelectCommits(records, closure, 1, out scanned, out skipped);
+
+            failures += Held("asking for one commit stops at the newest one worth replaying",
+                chosen != null && chosen.Count == 1 && chosen[0].sha == "bbbb2222" && scanned == 2);
+
+            // What -replayFilter off promises: no judgement about what a commit could have changed.
+            chosen = InvokeSelectCommits(records, null, 10, out scanned, out skipped);
+
+            failures += Held("without a dependency list every commit with a parent is replayed",
+                chosen != null && chosen.Count == 5 && skipped == 0);
+
+            return failures;
+        }
+
+        /// <summary>Reads a commit log the way the replay does. Deliberately not public API.</summary>
+        private static List<HistoryReplay.CommitRecord> InvokeParseLog(string log)
+        {
+            MethodInfo method = typeof(HistoryReplay).GetMethod("ParseLog",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            if (method == null)
+            {
+                Held("HistoryReplay still has a ParseLog to test", false);
+                return null;
+            }
+
+            return (List<HistoryReplay.CommitRecord>)method.Invoke(null, new object[] { log });
+        }
+
+        /// <summary>Calls the replay's commit chooser. Deliberately not public API.</summary>
+        private static List<HistoryReplay.CommitRecord> InvokeSelectCommits(
+            List<HistoryReplay.CommitRecord> records, HashSet<string> closure, int count,
+            out int scanned, out int skipped)
+        {
+            scanned = 0;
+            skipped = 0;
+
+            MethodInfo method = typeof(HistoryReplay).GetMethod("SelectCommits",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            if (method == null)
+            {
+                Held("HistoryReplay still has a SelectCommits to test", false);
+                return null;
+            }
+
+            object[] arguments = { records, closure, count, 0, 0 };
+            var chosen = (List<HistoryReplay.CommitRecord>)method.Invoke(null, arguments);
+
+            scanned = (int)arguments[3];
+            skipped = (int)arguments[4];
+
+            return chosen;
         }
 
         /// <summary>Calls the replay's private filter, which is deliberately not public API.</summary>
