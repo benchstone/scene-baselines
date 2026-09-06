@@ -27,11 +27,13 @@ if [ ! -f "$SRC/package.json" ]; then
   exit 1
 fi
 
-# Only what the package ships. Repo infrastructure (.git*, Tools~) is not in the
-# project copy and must never be deleted by a sync.
+# Only what the package ships. Repo infrastructure (.git*, this script) is not in
+# the project copy and must never be deleted by a sync, so Tools~ is named file by
+# file rather than as a directory.
 ITEMS=(Editor Tests package.json package.json.meta Editor.meta Tests.meta
        README.md README.md.meta LICENSE.md LICENSE.md.meta
-       CHANGELOG.md CHANGELOG.md.meta)
+       CHANGELOG.md CHANGELOG.md.meta
+       Tools~/replay-history.sh)
 
 drift=0
 for item in "${ITEMS[@]}"; do

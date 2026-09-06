@@ -4,6 +4,58 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-09-06
+
+### Added
+
+- **Replay a project's own history**, newest commit first, streaming what this tool would
+  have caught at each one. A healthy project reports nothing, which is the right answer
+  and a useless demonstration — nobody can tell "it works and there is nothing wrong"
+  from "it does not work". A repository's past answers that from the project's own
+  evidence: on a real open-source game it reported a regression that entered through a
+  prefab, where the scene's own diff shows nothing at all.
+
+  ```bash
+  Tools~/replay-history.sh --project <path> --unity <path/to/Unity> \
+        --commits 10 --scene Assets/Scenes/Level.unity --out <dir outside the project>
+  ```
+
+  About a minute per commit, so the first finding arrives in one or two — measured at
+  48-75 seconds per commit over a repository of this size. The editor is relaunched for
+  each step, because checking a commit out underneath a live editor crashes Unity: a
+  domain reload swaps assemblies, and objects using `[SerializeReference]` cannot be read
+  back by assemblies that did not write them. The driver script exists to do the one
+  thing an editor cannot do for itself — check out a commit while no editor is running.
+  Every decision stays in `SceneBaselines.HistoryReplay`, where it is tested.
+
+  **A replay never writes into the repository it inspects.** The report, the baselines
+  and the run's own state file all live outside it. It refuses to start in Play Mode,
+  with unsaved scene changes, or with uncommitted changes to tracked files, and it puts
+  the branch back on every exit path, including a failure. The four files Unity rewrites
+  simply by opening a project are allowed through and restored afterwards, because a
+  strict rule about them would mean the feature never runs at all.
+
+  It stops rather than guesses. Where a commit no longer compiles — an old dependency
+  that no longer resolves, most often — the report says it cannot replay past that
+  commit, instead of reporting a project that produced no scene as a mass deletion.
+
+### Changed
+
+- **A replay does not compare project-wide settings**, and says so twice: once in the
+  report header, and once in each commit's section, naming how many findings it set
+  aside. This is the only filtering anything in this package does. Unity reads project
+  settings once per session rather than importing them like assets, so after a checkout
+  the editor's tags, layers and physics can still be a commit nobody asked about: a
+  commit that touched only `README.md` reported two tag findings for a tag that exists in
+  no commit being replayed. Scene-scope settings still compare, because they live in the
+  scene file, which Unity does re-import. An ordinary check is untouched — there the
+  editor's view and the working tree are the same thing, which is exactly the assumption
+  a replay breaks.
+
+- Each pair of commits in a replay records into its own baseline folder. Sharing one
+  folder let a baseline outlive the commit it described, so a finding was re-reported at
+  every commit after the one that caused it.
+
 ## [0.3.0] — 2026-09-05
 
 ### Changed

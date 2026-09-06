@@ -97,6 +97,7 @@ namespace SceneBaselines
         [Test, Order(24)] public void A_grouped_report_still_prints_every_finding() => Verify(CheckGroupedReportPrintsEveryFinding);
         [Test, Order(25)] public void Repeated_assets_and_lost_siblings_group_too() => Verify(CheckRepetitionTheSubtreeRuleCannotReach);
         [Test, Order(26)] public void A_long_finding_is_capped_and_says_what_it_held_back() => Verify(CheckLongFindingsAreCappedHonestly);
+        [Test, Order(27)] public void A_replay_sets_aside_only_project_settings() => Verify(CheckReplaySetsAsideOnlyProjectSettings);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -305,6 +306,7 @@ namespace SceneBaselines
                 failures += CheckGroupedReportPrintsEveryFinding();
                 failures += CheckRepetitionTheSubtreeRuleCannotReach();
                 failures += CheckLongFindingsAreCappedHonestly();
+                failures += CheckReplaySetsAsideOnlyProjectSettings();
             }
             finally
             {
@@ -1832,6 +1834,129 @@ namespace SceneBaselines
             }
 
             return count;
+        }
+
+        /// <remarks>
+        /// A replay sets project-wide settings findings aside, which is the ONLY filtering anything
+        /// in this package does, so it is the one place where a silent mistake would look like good
+        /// news. The reason it is allowed at all is measured: Unity reads project settings once per
+        /// session instead of importing them, so after a checkout the editor's tags could still be a
+        /// different commit's — on Boss Room a README-only commit reported two tag findings for a tag
+        /// that exists in no commit being replayed.
+        ///
+        /// What must stay true: only project-scope settings go, scene settings and object findings
+        /// stay, the counts left behind agree with the findings left behind, and a scene emptied by
+        /// the filter stops calling itself a regression.
+        /// </remarks>
+        private static int CheckReplaySetsAsideOnlyProjectSettings()
+        {
+            int failures = 0;
+
+            var report = new RegressionReport.Report
+            {
+                verdict = "regressions",
+                totalFindings = 4,
+                scenesChecked = 2,
+                baselinesCompared = 2
+            };
+
+            var mixed = new RegressionReport.ReportScene
+            {
+                sceneName = "Level",
+                scenePath = "Assets/Level.unity",
+                verdict = "regressions",
+                headline = "REGRESSIONS FOUND — 3 across 1 of 1 baseline(s).",
+                findingCount = 3,
+                baselinesCompared = 1
+            };
+
+            var mixedBaseline = new RegressionReport.ReportBaseline { id = "b1", verdict = "regressions" };
+            mixedBaseline.findings.Add(Finding("changed", "Level/Enemy"));
+            mixedBaseline.findings.Add(Finding("settings-changed", "project/tags"));
+            mixedBaseline.findings.Add(Finding("settings-changed", "scene/render"));
+            mixed.baselines.Add(mixedBaseline);
+
+            var settingsOnly = new RegressionReport.ReportScene
+            {
+                sceneName = "Menu",
+                scenePath = "Assets/Menu.unity",
+                verdict = "regressions",
+                headline = "REGRESSIONS FOUND — 1 across 1 of 1 baseline(s).",
+                findingCount = 1,
+                baselinesCompared = 1
+            };
+
+            var settingsBaseline = new RegressionReport.ReportBaseline { id = "b2", verdict = "regressions" };
+            settingsBaseline.findings.Add(Finding("settings-changed", "project/physics"));
+            settingsOnly.baselines.Add(settingsBaseline);
+
+            report.scenes.Add(mixed);
+            report.scenes.Add(settingsOnly);
+
+            int setAside = InvokeSetAsideProjectSettings(report);
+
+            failures += Held("both project-scope settings findings are set aside",
+                setAside == 2);
+            failures += Held("an object finding is untouched",
+                mixedBaseline.findings.Any(f => f.kind == "changed" && f.path == "Level/Enemy"));
+            failures += Held("a SCENE-scope setting is untouched -- it lives in the scene file",
+                mixedBaseline.findings.Any(f => f.path == "scene/render"));
+            failures += Held("no project-scope setting survives",
+                !report.scenes.SelectMany(s => s.baselines).SelectMany(b => b.findings)
+                    .Any(f => f.path != null && f.path.StartsWith("project/")));
+
+            // The counts and the findings must tell the same story, or the report is lying twice.
+            failures += Held("the total matches what is actually left",
+                report.totalFindings == 2 &&
+                report.scenes.Sum(s => s.baselines.Sum(b => b.findings.Count)) == report.totalFindings);
+            failures += Held("the scene that kept findings still counts them correctly",
+                mixed.findingCount == 2 && mixed.verdict == "regressions");
+            failures += Held("a scene emptied by the filter stops claiming regressions",
+                settingsOnly.findingCount == 0 &&
+                settingsOnly.verdict == "pass" &&
+                settingsOnly.headline.StartsWith("PASS") &&
+                settingsBaseline.verdict == "pass");
+
+            // A report with nothing left must not still be a failing report.
+            var onlySettings = new RegressionReport.Report
+            {
+                verdict = "regressions", totalFindings = 1, scenesChecked = 1, baselinesCompared = 1
+            };
+            var lone = new RegressionReport.ReportScene
+            {
+                sceneName = "Solo", verdict = "regressions", findingCount = 1, baselinesCompared = 1
+            };
+            var loneBaseline = new RegressionReport.ReportBaseline { id = "b3", verdict = "regressions" };
+            loneBaseline.findings.Add(Finding("settings-changed", "project/tags"));
+            lone.baselines.Add(loneBaseline);
+            onlySettings.scenes.Add(lone);
+
+            InvokeSetAsideProjectSettings(onlySettings);
+
+            failures += Held("a report left with nothing is a pass, not a regression",
+                onlySettings.totalFindings == 0 && onlySettings.verdict == "pass");
+
+            return failures;
+        }
+
+        private static RegressionReport.ReportFinding Finding(string kind, string path)
+        {
+            return new RegressionReport.ReportFinding { kind = kind, path = path };
+        }
+
+        /// <summary>Calls the replay's private filter, which is deliberately not public API.</summary>
+        private static int InvokeSetAsideProjectSettings(RegressionReport.Report report)
+        {
+            MethodInfo method = typeof(HistoryReplay).GetMethod("SetAsideProjectSettings",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            if (method == null)
+            {
+                Held("HistoryReplay still has a SetAsideProjectSettings to test", false);
+                return -1;
+            }
+
+            return (int)method.Invoke(null, new object[] { report });
         }
 
         private static FindingRollup.Item RollupItem(string kind, string path, params string[] changes)
