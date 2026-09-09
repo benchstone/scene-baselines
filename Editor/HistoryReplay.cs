@@ -547,7 +547,7 @@ namespace SceneBaselines
             if (setAside > 0)
             {
                 section.AppendLine($"*{setAside} project-settings finding(s) set aside here — a replay " +
-                                   "cannot attribute those to a commit; see the note at the top.*");
+                                   "cannot attribute those to a commit; see \"How to read this\" at the end.*");
                 section.AppendLine();
             }
 
@@ -1200,52 +1200,84 @@ namespace SceneBaselines
 
         // ── The report, written as the run goes ──────────────────────────────────
 
+        /// <summary>
+        /// Opens the report: what this is, the one fact that decides what it means, and nothing else.
+        /// </summary>
+        /// <remarks>
+        /// The caveats a replay owes its reader are real and none of them were removed — they moved
+        /// to <see cref="AppendHowToRead"/> at the end. A first-time reader met three dense block
+        /// quotes before a single finding, which is a strange way to sell a report whose entire
+        /// value is the finding. Only the choosing of commits stays here, because it is the one
+        /// thing that changes what the whole page MEANS: a reader who thinks these are simply the
+        /// last N commits reads "no findings" as "nothing happened in the last N commits", which is
+        /// a far stronger claim than the one being made. One sentence carries that; the rest waits.
+        /// </remarks>
         private static void BeginReport(Plan plan)
         {
             var header = new StringBuilder();
             header.AppendLine("# History replay");
             header.AppendLine();
-            header.AppendLine($"Replaying {plan.commits.Count} commit(s) over {plan.scenes.Count} scene(s), " +
-                              "newest first. Each commit is compared against its own parent: the parent is " +
-                              "captured as known-good, then the commit is checked against it.");
+            header.AppendLine($"What this tool would have reported at {plan.commits.Count} commit(s) of this " +
+                              $"project's own history, over {plan.scenes.Count} scene(s), newest first. Each " +
+                              "commit is compared against its own parent: the parent is captured as " +
+                              "known-good, then the commit is checked against it.");
             header.AppendLine();
 
-            // Said at the top because it decides what the whole page means: a reader who thinks
-            // these are the last N commits will read "no findings" as "nothing happened in the last
-            // N commits", which is a different and much stronger claim than the one being made.
             if (plan.filtered)
             {
-                header.AppendLine($"**Chosen from the last {plan.scanned} commit(s).** {plan.skipped} of them " +
-                                  $"changed none of the {plan.closureSize} file(s) these scene(s) depend on, so " +
-                                  "they cannot have changed what the scenes look like and were never opened. " +
-                                  "The dependencies are the ones Unity reports for these scenes — the scene " +
-                                  "files, and the prefabs, materials, ScriptableObjects and scripts they " +
-                                  "reference, plus the .meta file of each. That is why a commit that never " +
-                                  "touched a scene file can still appear here: the regressions worth catching " +
-                                  "arrive through a prefab, where the scene's own diff is empty.");
-                header.AppendLine();
-                header.AppendLine("> Two limits of choosing them that way. The dependency list is read at the " +
-                                  "commit this run started from, so a file the scenes used to reference and no " +
-                                  "longer do is not noticed. And merge commits are not replayed: git attributes " +
-                                  "their changes to the commits they merge, which are replayed instead. Pass " +
-                                  "`-replayFilter off` to replay every commit regardless.");
+                header.AppendLine($"These are the {plan.commits.Count} commit(s), out of the last " +
+                                  $"{plan.scanned} looked at, that changed something these scene(s) depend " +
+                                  $"on. The other {plan.skipped} cannot have changed how the scenes look and " +
+                                  "were never opened.");
                 header.AppendLine();
             }
-            header.AppendLine("> These are findings this tool WOULD have reported at the time. Objects added " +
-                              "since a baseline are not regressions, and this checks scene state, not runtime " +
-                              "behaviour.");
-            header.AppendLine();
-            header.AppendLine("> **Project-wide settings are not compared in a replay.** Unity reads them once " +
-                              "per session rather than importing them like assets, so after a checkout the " +
-                              "editor's view of tags, layers, physics and quality can still belong to a " +
-                              "different commit — measured here, not assumed. Findings about them would say " +
-                              "more about the editor than about the commit, so they are set aside and counted " +
-                              "rather than reported. Scene settings, which live in the scene file, are compared " +
-                              "as usual, and an ordinary (non-replay) check compares everything.");
+
+            header.AppendLine("*How to read this, and what a replay does not compare, is at the end.*");
             header.AppendLine();
 
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(plan.reportPath)));
             File.WriteAllText(plan.reportPath, header.ToString(), new UTF8Encoding(false));
+        }
+
+        /// <summary>The caveats, at the end, where they are not standing in front of the findings.</summary>
+        private static void AppendHowToRead(Plan plan, StringBuilder tail)
+        {
+            tail.AppendLine();
+            tail.AppendLine("## How to read this");
+            tail.AppendLine();
+            tail.AppendLine("> These are findings this tool WOULD have reported at the time. Objects added " +
+                            "since a baseline are not regressions, and this checks scene state, not runtime " +
+                            "behaviour. A finding is a real difference, not necessarily a mistake: most " +
+                            "changes in a history were meant, and no tool can know which.");
+            tail.AppendLine();
+
+            if (plan.filtered)
+            {
+                tail.AppendLine($"> **How the {plan.commits.Count} commit(s) were chosen.** {plan.skipped} of " +
+                                $"the last {plan.scanned} changed none of the {plan.closureSize} file(s) these " +
+                                "scene(s) depend on, so they cannot have changed what the scenes look like and " +
+                                "were never opened. The dependencies are the ones Unity reports for these " +
+                                "scenes — the scene files, and the prefabs, materials, ScriptableObjects and " +
+                                "scripts they reference, plus the .meta file of each. That is why a commit " +
+                                "that never touched a scene file can still appear here: the regressions worth " +
+                                "catching arrive through a prefab, where the scene's own diff is empty.");
+                tail.AppendLine();
+                tail.AppendLine("> Two limits of choosing them that way. The dependency list is read at the " +
+                                "commit this run started from, so a file the scenes used to reference and no " +
+                                "longer do is not noticed. And merge commits are not replayed: git attributes " +
+                                "their changes to the commits they merge, which are replayed instead. Pass " +
+                                "`-replayFilter off` to replay every commit regardless.");
+                tail.AppendLine();
+            }
+
+            tail.AppendLine("> **Project-wide settings are not compared in a replay.** Unity reads them once " +
+                            "per session rather than importing them like assets, so after a checkout the " +
+                            "editor's view of tags, layers, physics and quality can still belong to a " +
+                            "different commit — measured here, not assumed. Findings about them would say " +
+                            "more about the editor than about the commit, so they are set aside and counted " +
+                            "rather than reported. Scene settings, which live in the scene file, are compared " +
+                            "as usual, and an ordinary (non-replay) check compares everything.");
+            tail.AppendLine();
         }
 
         private static void AppendReport(Plan plan, string text)
@@ -1261,6 +1293,8 @@ namespace SceneBaselines
             tail.AppendLine();
             tail.AppendLine($"Replay {reason}: {plan.commitsReported} of {plan.commits.Count} commit(s) " +
                             $"reported, {plan.findings} finding(s) in total.");
+
+            AppendHowToRead(plan, tail);
 
             try
             {

@@ -77,16 +77,47 @@ if [ "$ORIGINAL" = "HEAD" ]; then
 fi
 echo "Replaying $COMMITS commit(s) in $PROJECT. Will return to '$ORIGINAL'."
 
+EDITOR_PID=""
+
 restore() {
+  # An editor left running holds the project and the log open, and a tree left on some commit from
+  # the middle of the run is worse than the one the user started with.
+  if [ -n "$EDITOR_PID" ] && kill -0 "$EDITOR_PID" 2>/dev/null; then
+    kill "$EDITOR_PID" 2>/dev/null || true
+    wait "$EDITOR_PID" 2>/dev/null || true
+  fi
+
   echo "Restoring '$PROJECT' to '$ORIGINAL'."
   git -C "$PROJECT" checkout --force "$ORIGINAL" >/dev/null 2>&1 ||
     echo "COULD NOT RESTORE. Run: git -C '$PROJECT' checkout --force '$ORIGINAL'" >&2
 }
 trap restore INT TERM
 
+# What the editor has said so far this step. Unity prints nothing until it exits and a step takes
+# about a minute, so its lines are followed out of the log while it works: silence for minutes is
+# what makes a first run feel broken rather than slow. Each step rewrites the log, so this restarts
+# with it.
+show_new_lines() {
+  local total
+  total=$(grep -ac "\[Scene Baselines\]" "$LOG" 2>/dev/null || true)
+  total=${total:-0}
+
+  if [ "$total" -gt "$SHOWN" ]; then
+    grep -a "\[Scene Baselines\]" "$LOG" 2>/dev/null | tail -n "$((total - SHOWN))" | sed 's/^/  /'
+    SHOWN=$total
+  fi
+}
+
 step=0
 while : ; do
   step=$((step + 1))
+
+  if [ "$step" -eq 1 ]; then
+    echo "Step 1: starting the editor. This first launch also imports the project, which on a large" \
+         "one takes considerably longer than the minute or so each later step costs."
+  else
+    echo "Step $step: starting the editor."
+  fi
 
   "$UNITY" -batchmode -nographics \
     -projectPath "$PROJECT" \
@@ -97,12 +128,21 @@ while : ; do
     ${CHOICE_ARGS+"${CHOICE_ARGS[@]}"} \
     -baselineDir "$BASELINES" \
     -reportDir "$OUT" \
-    -logFile "$LOG"
-  code=$?
+    -logFile "$LOG" &
+  EDITOR_PID=$!
 
-  # Streamed as it happens: the number that decides whether this is usable is time to the FIRST
-  # finding, so the driver echoes each step's lines rather than waiting for the run to end.
-  grep -a "\[Scene Baselines\]" "$LOG" | tail -5
+  SHOWN=0
+  while kill -0 "$EDITOR_PID" 2>/dev/null; do
+    show_new_lines
+    sleep 2
+  done
+
+  # The number that decides whether this is usable is time to the FIRST finding, so nothing waits
+  # for the run to end -- but the last lines can land between the final poll and the exit.
+  wait "$EDITOR_PID"
+  code=$?
+  EDITOR_PID=""
+  show_new_lines
 
   if [ $code -eq 2 ]; then
     echo "Replay refused or failed at step $step — see $LOG" >&2

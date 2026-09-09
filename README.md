@@ -65,9 +65,19 @@ Tools~/replay-history.sh --project <path to a clone> --unity <path/to/Unity> \
 > they are present at commits that predate them. `git clone <your repo> ../replay-clone` costs a
 > minute.
 
-The script ships with the package: `Tools~/replay-history.sh` in a clone of this repository, or
+On Windows, the same run in PowerShell:
+
+```powershell
+.\replay-history.ps1 -Project <path to a clone> -Unity "<path\to\Unity.exe>" `
+      -Commits 10 -Scene Assets/Scenes/Level_01.unity -Out $HOME\replay
+```
+
+Both scripts ship with the package — `Tools~/` in a clone of this repository, or
 `Library/PackageCache/com.benchstone.scenebaselines@*/Tools~/` when it was installed through the
-Package Manager. Bash today; on Windows, Git Bash comes with Git for Windows.
+Package Manager. They do the same job and take the same options.
+
+A step prints what the editor is doing while it is doing it, so a slow run looks slow rather than
+stuck, and the first finding reaches you without waiting for the last commit.
 
 **What it costs.** About a minute per commit, and the first launch also imports the project, which
 on a large one takes considerably longer than that. `--commits 10` counts commits *worth

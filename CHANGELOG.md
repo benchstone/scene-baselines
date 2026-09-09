@@ -4,6 +4,35 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-09-09
+
+### Added
+
+- **A PowerShell driver for replay**, `Tools~/replay-history.ps1`, with the same options as the
+  bash one spelled `-Project`, `-Unity`, `-Commits`, `-Scene`. Replay was bash-only while most
+  of the people it is meant for develop on Windows.
+
+- **A replay says what it is doing while it does it.** Unity prints nothing until it exits and a
+  step takes about a minute, so both drivers now follow the editor's own lines out of the log as
+  they appear, and name the step before launching it — including that the first launch also
+  imports the project and takes longer. Minutes of silence is what makes a first run feel broken
+  rather than slow.
+
+### Changed
+
+- **A replay report leads with its findings.** The caveats a replay owes its reader — what it
+  does not compare, how the commits were chosen, what a finding is and is not — were three
+  dense block quotes standing in front of the first finding. They now live under **How to read
+  this** at the end, and none was dropped. One sentence stays at the top: which commits were
+  chosen and out of how many, because that decides what the whole page means. A reader who
+  believes these are simply the last N commits reads "no findings" as "nothing happened in the
+  last N commits", which is a far stronger claim than the report makes.
+
+- **The README documents replay at all.** It described the loop, coverage, CI and the licence and
+  never mentioned the feature that shows what this package would have caught on your own project.
+  It now has a section, with what a run costs, what comes out of it, and why to point it at a
+  clone.
+
 ## [0.5.0] — 2026-09-09
 
 ### Added

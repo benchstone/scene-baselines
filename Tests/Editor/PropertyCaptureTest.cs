@@ -100,6 +100,7 @@ namespace SceneBaselines
         [Test, Order(27)] public void A_replay_sets_aside_only_project_settings() => Verify(CheckReplaySetsAsideOnlyProjectSettings);
         [Test, Order(28)] public void Commits_are_chosen_by_what_the_scenes_depend_on() => Verify(CheckCommitsAreChosenByWhatTheScenesDependOn);
         [Test, Order(29)] public void A_commit_says_how_far_it_reached() => Verify(CheckCommitScopeIsStated);
+        [Test, Order(30)] public void A_replay_report_leads_with_findings() => Verify(CheckReplayReportLeadsWithFindings);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -311,6 +312,7 @@ namespace SceneBaselines
                 failures += CheckReplaySetsAsideOnlyProjectSettings();
                 failures += CheckCommitsAreChosenByWhatTheScenesDependOn();
                 failures += CheckCommitScopeIsStated();
+                failures += CheckReplayReportLeadsWithFindings();
             }
             finally
             {
@@ -2032,6 +2034,88 @@ namespace SceneBaselines
             return failures;
         }
 
+        /// <remarks>
+        /// A first-time reader met three dense block quotes before a single finding: what a replay
+        /// does not compare, how commits were chosen, and what a finding is and is not. All three
+        /// are owed to them and none was removed — they moved to the end. This asserts the shape
+        /// that change bought, and, more importantly, that the move did not quietly lose one: a
+        /// caveat deleted and a caveat relocated look identical from the top of the file.
+        ///
+        /// The one thing that stays at the top is how the commits were chosen, because it decides
+        /// what the whole page MEANS. A reader who believes these are simply the last N commits
+        /// reads "no findings" as "nothing happened in the last N commits", which is a far stronger
+        /// claim than the report is making.
+        /// </remarks>
+        private static int CheckReplayReportLeadsWithFindings()
+        {
+            int failures = 0;
+
+            string folder = Path.Combine(Path.GetTempPath(), "SceneBaselinesReport-" + System.Guid.NewGuid().ToString("N"));
+            string reportPath = Path.Combine(folder, "history-replay.md");
+
+            var plan = new HistoryReplay.Plan
+            {
+                reportPath = reportPath,
+                filtered = true,
+                scanned = 52,
+                skipped = 42,
+                closureSize = 1010,
+                commitsReported = 1,
+                findings = 3
+            };
+
+            plan.commits.Add("abc1234");
+            plan.parents.Add("def5678");
+            plan.subjects.Add("a subject");
+            plan.scenes.Add("Assets/Scenes/Level.unity");
+
+            try
+            {
+                InvokeBeginReport(plan);
+                string header = File.ReadAllText(reportPath);
+
+                failures += Held("the header does not open with the caveats",
+                    !header.Contains("Project-wide settings are not compared") &&
+                    !header.Contains("Objects added"));
+                failures += Held("but it does say how the commits were chosen, which decides what the page means",
+                    header.Contains("52") && header.Contains("42"));
+                failures += Held("and it says where the rest of it went",
+                    header.Contains("at the end"));
+
+                // Whatever a real run would stream between the header and the tail.
+                File.AppendAllText(reportPath, "\n## `abc1234` a subject\n\n- **CHANGED** Level/Enemy\n");
+
+                InvokeFinishReport(plan, "complete");
+                string whole = File.ReadAllText(reportPath);
+
+                int finding = whole.IndexOf("**CHANGED** Level/Enemy", System.StringComparison.Ordinal);
+                int howToRead = whole.IndexOf("## How to read this", System.StringComparison.Ordinal);
+                int settings = whole.IndexOf("Project-wide settings are not compared", System.StringComparison.Ordinal);
+                int chosen = whole.IndexOf("How the 1 commit(s) were chosen", System.StringComparison.Ordinal);
+
+                failures += Held("the findings come before the notes about them",
+                    finding >= 0 && howToRead > finding);
+
+                // Relocated, not deleted -- which is the failure this test exists to catch.
+                failures += Held("the project-settings caveat survived the move",
+                    settings > howToRead);
+                failures += Held("the full explanation of how commits were chosen survived it too",
+                    chosen > howToRead);
+                failures += Held("and so did what a finding is and is not",
+                    whole.IndexOf("not necessarily a mistake", System.StringComparison.Ordinal) > howToRead);
+
+                failures += Held("the run's own outcome is still stated",
+                    whole.Contains("1 of 1 commit(s) reported, 3 finding(s) in total"));
+            }
+            finally
+            {
+                if (Directory.Exists(folder))
+                    Directory.Delete(folder, true);
+            }
+
+            return failures;
+        }
+
         private static RegressionReport.ReportFinding Finding(string kind, string path)
         {
             return new RegressionReport.ReportFinding { kind = kind, path = path };
@@ -2199,6 +2283,34 @@ namespace SceneBaselines
             }
 
             return (int)method.Invoke(null, new object[] { report });
+        }
+
+        private static void InvokeBeginReport(HistoryReplay.Plan plan)
+        {
+            MethodInfo method = typeof(HistoryReplay).GetMethod("BeginReport",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            if (method == null)
+            {
+                Held("HistoryReplay still has a BeginReport to test", false);
+                return;
+            }
+
+            method.Invoke(null, new object[] { plan });
+        }
+
+        private static void InvokeFinishReport(HistoryReplay.Plan plan, string reason)
+        {
+            MethodInfo method = typeof(HistoryReplay).GetMethod("FinishReport",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            if (method == null)
+            {
+                Held("HistoryReplay still has a FinishReport to test", false);
+                return;
+            }
+
+            method.Invoke(null, new object[] { plan, reason });
         }
 
         private static string InvokeScopeLine(HistoryReplay.Plan plan, RegressionReport.Report report)
