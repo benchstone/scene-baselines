@@ -4,6 +4,34 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-09-09
+
+### Added
+
+- **Each replayed commit says how far it reached.** One line under the commit's heading, before
+  its findings:
+
+  ```
+  Scope: 2 file(s) changed, 1 of them file(s) these scene(s) depend on — 45 object(s) and
+  2 asset(s) differ.
+  ```
+
+  It is the one thing a reader cannot get from the findings themselves. "45 object(s) differ"
+  means nothing until it sits beside "2 file(s) changed": a large refactor that moves a lot of
+  scene is ordinary, and a two-file commit that moves a lot of scene is the shape of a change
+  nobody knew they were making — which is exactly how the regression this package found on
+  a real open-source game arrived, through a prefab, where the scene's own diff is empty.
+
+  Objects are counted once however many findings they carry, because the number answers "how far
+  did this reach", not "how much is there to read" — that is what grouping is for. A count git
+  cannot supply is left unsaid rather than printed as a zero: a merge lists no files of its own.
+
+  **Context, not a score, and deliberately so.** Measured over fifteen replayed commits of a real
+  project, findings per file changed ranks the one known true regression ninth of fifteen, and
+  "findings in a scene whose own file the commit never touched" holds for 59 of 85 scene sections
+  — in a prefab-heavy project that is the normal case, not an alarm. So the numbers are
+  printed and the reader judges. Nothing is reordered, and nothing is ever dropped.
+
 ## [0.4.0] — 2026-09-06
 
 ### Added

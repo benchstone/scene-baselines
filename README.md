@@ -90,12 +90,12 @@ Read them with `git diff --word-diff`; the state is one long line per object.
 **Window ▸ General ▸ Test Runner ▸ EditMode.** The suite runs against throwaway objects — no
 Play Mode, no scene of yours is touched, nothing is written.
 
-Twenty-eight groups, and all twenty-eight run — in the Test Runner and in CI alike. Four of them
+Twenty-nine groups, and all twenty-nine run — in the Test Runner and in CI alike. Four of them
 need a saved scene to work on. Rather than skip, they use the scene you already have open, and
 otherwise create a temporary one and put your scene setup back afterwards. If anything in the editor
 has unsaved changes they refuse to run at all, rather than risk discarding it.
 
-The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same twenty-eight
+The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same twenty-nine
 against whatever scene you have open.
 
 ### What CI checks
@@ -104,11 +104,11 @@ against whatever scene you have open.
 `.cs` and folder has a `.meta`, that no `.meta` is orphaned, that `package.json` agrees with the
 changelog, and that `Editor/` makes no network calls — that last one guards a claim this README makes.
 
-**Then it runs all twenty-eight EditMode tests on real editors**, headless on Linux, against minimal
+**Then it runs all twenty-nine EditMode tests on real editors**, headless on Linux, against minimal
 projects under `CI~/` that install this package by relative path — once on **Unity 6** and once on
 **2021.3 LTS**, the floor this package claims support for. A green badge means the structure checks
-and both runs of the twenty-eight tests passed, on hardware that is not the author's. CI also
-asserts that each run actually contained twenty-eight tests, because a run that discovers none would
+and both runs of the twenty-nine tests passed, on hardware that is not the author's. CI also
+asserts that each run actually contained twenty-nine tests, because a run that discovers none would
 otherwise pass while proving nothing.
 
 One honest caveat: a fork cannot see the repository's Unity credentials, and GitHub does not pass

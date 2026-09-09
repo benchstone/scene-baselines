@@ -99,6 +99,7 @@ namespace SceneBaselines
         [Test, Order(26)] public void A_long_finding_is_capped_and_says_what_it_held_back() => Verify(CheckLongFindingsAreCappedHonestly);
         [Test, Order(27)] public void A_replay_sets_aside_only_project_settings() => Verify(CheckReplaySetsAsideOnlyProjectSettings);
         [Test, Order(28)] public void Commits_are_chosen_by_what_the_scenes_depend_on() => Verify(CheckCommitsAreChosenByWhatTheScenesDependOn);
+        [Test, Order(29)] public void A_commit_says_how_far_it_reached() => Verify(CheckCommitScopeIsStated);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -309,6 +310,7 @@ namespace SceneBaselines
                 failures += CheckLongFindingsAreCappedHonestly();
                 failures += CheckReplaySetsAsideOnlyProjectSettings();
                 failures += CheckCommitsAreChosenByWhatTheScenesDependOn();
+                failures += CheckCommitScopeIsStated();
             }
             finally
             {
@@ -1941,6 +1943,95 @@ namespace SceneBaselines
             return failures;
         }
 
+        /// <remarks>
+        /// Scope is the only thing in a replay report that is neither a finding nor a count of
+        /// findings: it is the commit's own size, put beside the scenes' movement so a reader can
+        /// tell "a big refactor moved a lot" from "two files moved a lot", which no list of
+        /// findings can say. Two properties are load-bearing and neither is obvious from reading
+        /// the sentence. Objects are counted ONCE however many findings they carry — the number
+        /// answers "how far did this reach", not "how much is there to read", which is the
+        /// roll-up's job. And a count git could not supply is not a zero: a merge lists no files
+        /// of its own, and "0 file(s) changed" would be a measurement rather than an absence.
+        ///
+        /// The last assertion is the one to keep if the others ever go: adding context must not
+        /// remove a finding. Every other part of this tool prints its count before its groups for
+        /// the same reason, and scope is the first thing here that could quietly break it.
+        /// </remarks>
+        private static int CheckCommitScopeIsStated()
+        {
+            int failures = 0;
+
+            var report = new RegressionReport.Report { verdict = "regressions", totalFindings = 5 };
+
+            var level = new RegressionReport.ReportScene
+            {
+                sceneName = "Level",
+                scenePath = "Assets/Level.unity",
+                verdict = "regressions",
+                findingCount = 4,
+                baselinesCompared = 1
+            };
+
+            var levelBaseline = new RegressionReport.ReportBaseline { id = "b1", verdict = "regressions" };
+            levelBaseline.findings.Add(Finding("changed", "Level/Enemy"));   // one object,
+            levelBaseline.findings.Add(Finding("changed", "Level/Enemy"));   // two findings
+            levelBaseline.findings.Add(Finding("asset-changed", "Assets/Enemy.mat"));
+            levelBaseline.findings.Add(Finding("settings-changed", "scene/render"));
+            level.baselines.Add(levelBaseline);
+
+            var menu = new RegressionReport.ReportScene
+            {
+                sceneName = "Menu",
+                scenePath = "Assets/Menu.unity",
+                verdict = "regressions",
+                findingCount = 1,
+                baselinesCompared = 1
+            };
+
+            // The same path in another scene is another object, not the same one seen twice.
+            var menuBaseline = new RegressionReport.ReportBaseline { id = "b2", verdict = "regressions" };
+            menuBaseline.findings.Add(Finding("changed", "Level/Enemy"));
+            menu.baselines.Add(menuBaseline);
+
+            report.scenes.Add(level);
+            report.scenes.Add(menu);
+
+            var plan = new HistoryReplay.Plan { index = 0 };
+            plan.fileCounts.Add(2);
+            plan.dependencyFileCounts.Add(1);
+
+            string line = InvokeScopeLine(plan, report);
+
+            failures += Held("the line says how far the commit reached",
+                line != null && line.Contains("2 file(s) changed"));
+            failures += Held("and how much of that the scenes depend on",
+                line != null && line.Contains("1 of them"));
+            failures += Held("an object counts once however many findings it carries",
+                line != null && line.Contains("2 object(s)"));
+            failures += Held("assets are counted, and counted separately",
+                line != null && line.Contains("1 asset(s)"));
+            failures += Held("a setting is not a place a commit reached",
+                line != null && !line.Contains("3 object(s)"));
+
+            failures += Held("stating scope removes no finding",
+                report.totalFindings == 5 &&
+                report.scenes.Sum(s => s.baselines.Sum(b => b.findings.Count)) == 5);
+
+            // -1 is the private UnknownCount: what git could not answer.
+            var unknown = new HistoryReplay.Plan { index = 0 };
+            unknown.fileCounts.Add(-1);
+            unknown.dependencyFileCounts.Add(-1);
+
+            string withoutCounts = InvokeScopeLine(unknown, report);
+
+            failures += Held("an unknown file count is not reported as none",
+                withoutCounts != null && !withoutCounts.Contains("file(s) changed"));
+            failures += Held("and what did move is still said",
+                withoutCounts != null && withoutCounts.Contains("2 object(s)"));
+
+            return failures;
+        }
+
         private static RegressionReport.ReportFinding Finding(string kind, string path)
         {
             return new RegressionReport.ReportFinding { kind = kind, path = path };
@@ -2108,6 +2199,20 @@ namespace SceneBaselines
             }
 
             return (int)method.Invoke(null, new object[] { report });
+        }
+
+        private static string InvokeScopeLine(HistoryReplay.Plan plan, RegressionReport.Report report)
+        {
+            MethodInfo method = typeof(HistoryReplay).GetMethod("ScopeLine",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            if (method == null)
+            {
+                Held("HistoryReplay still has a ScopeLine to test", false);
+                return null;
+            }
+
+            return (string)method.Invoke(null, new object[] { plan, report });
         }
 
         private static FindingRollup.Item RollupItem(string kind, string path, params string[] changes)

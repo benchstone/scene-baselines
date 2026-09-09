@@ -67,6 +67,9 @@ namespace SceneBaselines
         /// <summary>Refused to start, or cannot carry on.</summary>
         public const int ExitRefused = 2;
 
+        /// <summary>A count git could not supply. Distinct from a count of zero, which is a fact.</summary>
+        private const int UnknownCount = -1;
+
         // ── The plan ─────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -95,6 +98,18 @@ namespace SceneBaselines
             public List<string> parents = new List<string>();
             public List<string> subjects = new List<string>();
             public List<string> scenes = new List<string>();
+
+            /// <summary>
+            /// How many files each commit changed, and how many of those the scenes depend on.
+            /// </summary>
+            /// <remarks>
+            /// Read while planning, because by the time a commit is reported the repository has
+            /// moved and asking git again would answer about a different checkout.
+            /// <see cref="UnknownCount"/> where git said nothing useful: a merge lists no files of
+            /// its own, and "0 file(s) changed" would read as a measurement rather than an absence.
+            /// </remarks>
+            public List<int> fileCounts = new List<int>();
+            public List<int> dependencyFileCounts = new List<int>();
 
             /// <summary>How the commits were chosen. The report states all of it.</summary>
             public bool filtered;
@@ -306,6 +321,14 @@ namespace SceneBaselines
                 plan.commits.Add(record.sha);
                 plan.parents.Add(record.parent);
                 plan.subjects.Add(record.subject);
+
+                // Planning with the filter off reads the log without --name-only, so the file list
+                // is asked for here instead: once per commit that will actually be replayed, which
+                // is nothing beside the editor launch each one costs.
+                List<string> files = record.files.Count > 0 ? record.files : FilesChangedBy(record.sha);
+
+                plan.fileCounts.Add(files.Count > 0 ? files.Count : UnknownCount);
+                plan.dependencyFileCounts.Add(closure == null ? UnknownCount : CountIn(closure, files));
             }
 
             if (plan.commits.Count == 0)
@@ -512,6 +535,13 @@ namespace SceneBaselines
                                ".");
             section.AppendLine();
 
+            string scope = ScopeLine(plan, report);
+            if (scope != null)
+            {
+                section.AppendLine(scope);
+                section.AppendLine();
+            }
+
             // Said per commit as well as once at the top, because a reader who scrolls to one
             // commit's section must be able to see that something was not compared there.
             if (setAside > 0)
@@ -531,6 +561,93 @@ namespace SceneBaselines
             }
 
             AppendReport(plan, section.ToString());
+        }
+
+        /// <summary>
+        /// One line saying how far the commit reached, beside how far the scenes moved.
+        /// </summary>
+        /// <remarks>
+        /// The one thing a reader cannot get from the findings themselves. "45 object(s) differ"
+        /// means nothing until it sits next to "2 file(s) changed": a large refactor that moves a
+        /// lot of scene is ordinary, and a two-file commit that moves a lot of scene is the shape
+        /// of a change nobody knew they were making. On Boss Room the regression worth catching
+        /// arrived through a prefab, where the scene's own diff is empty.
+        ///
+        /// 🚨 CONTEXT, DELIBERATELY NOT A SCORE, and that is measured rather than cautious.
+        /// Over 15 replayed Boss Room commits, findings per file changed ranks the one known true
+        /// regression NINTH of fifteen, and "findings in a scene whose own file the commit never
+        /// touched" holds for 59 of 85 scene sections — in a prefab-heavy project that is
+        /// the normal case, not an alarm. So both numbers are printed and the reader judges.
+        /// Ordering findings by this would bury the one that matters under the ones that look big.
+        /// </remarks>
+        private static string ScopeLine(Plan plan, RegressionReport.Report report)
+        {
+            int files = plan.index < plan.fileCounts.Count ? plan.fileCounts[plan.index] : UnknownCount;
+            int dependencies = plan.index < plan.dependencyFileCounts.Count
+                ? plan.dependencyFileCounts[plan.index]
+                : UnknownCount;
+
+            int objects, assets;
+            CountScope(report, out objects, out assets);
+
+            var moved = new List<string>();
+            if (objects > 0)
+                moved.Add($"{objects} object(s)");
+            if (assets > 0)
+                moved.Add($"{assets} asset(s)");
+
+            string reached = null;
+            if (files != UnknownCount)
+            {
+                reached = $"{files} file(s) changed";
+                if (dependencies != UnknownCount)
+                    reached += $", {dependencies} of them file(s) these scene(s) depend on";
+            }
+
+            string differs = moved.Count == 0
+                ? "no object or asset differs"
+                : string.Join(" and ", moved.ToArray()) + " differ";
+
+            if (reached == null)
+                return moved.Count == 0 ? null : $"Scope: {differs}.";
+
+            return $"Scope: {reached} — {differs}.";
+        }
+
+        /// <summary>
+        /// How many distinct things a report says differ, as against how many findings it holds.
+        /// </summary>
+        /// <remarks>
+        /// Two different numbers, for the reason the roll-up exists: one object with eleven changed
+        /// properties is eleven findings and one surprise. Scope is about how far a commit reached,
+        /// so an object counts once however much of it moved, and the same path in two scenes
+        /// counts twice because those are two objects. Settings are left out — they belong
+        /// to a scene or to the project, not to a place the commit reached.
+        /// </remarks>
+        private static void CountScope(RegressionReport.Report report, out int objects, out int assets)
+        {
+            string assetKind = RegressionReport.FindingKindToken(RegressionKind.AssetChanged);
+            string settingKind = RegressionReport.FindingKindToken(RegressionKind.SettingsChanged);
+
+            var seenObjects = new HashSet<string>(StringComparer.Ordinal);
+            var seenAssets = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (RegressionReport.ReportScene scene in report.scenes)
+            {
+                foreach (RegressionReport.ReportBaseline baseline in scene.baselines)
+                {
+                    foreach (RegressionReport.ReportFinding finding in baseline.findings)
+                    {
+                        if (finding.kind == assetKind)
+                            seenAssets.Add(finding.path);
+                        else if (finding.kind != settingKind)
+                            seenObjects.Add(scene.scenePath + "|" + finding.path);
+                    }
+                }
+            }
+
+            objects = seenObjects.Count;
+            assets = seenAssets.Count;
         }
 
         /// <summary>
@@ -731,6 +848,36 @@ namespace SceneBaselines
             }
 
             return records;
+        }
+
+        /// <summary>The files one commit changed, as git spells them.</summary>
+        private static List<string> FilesChangedBy(string sha)
+        {
+            var files = new List<string>();
+            string listed = Git("-c core.quotepath=false show --name-only --format= " + sha, out _);
+
+            foreach (string line in (listed ?? "").Split('\n'))
+            {
+                string file = line.TrimEnd('\r').Trim();
+                if (file.Length > 0)
+                    files.Add(file);
+            }
+
+            return files;
+        }
+
+        /// <summary>How many of the given files the scenes depend on.</summary>
+        private static int CountIn(HashSet<string> closure, List<string> files)
+        {
+            int hits = 0;
+
+            foreach (string file in files)
+            {
+                if (closure.Contains(file))
+                    hits++;
+            }
+
+            return hits;
         }
 
         private static string FirstParent(string parents)

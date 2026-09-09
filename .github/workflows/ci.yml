@@ -201,7 +201,7 @@ jobs:
           total=$(grep -o 'total="[0-9]*"' "$f" | head -1 | tr -dc '0-9')
           passed=$(grep -o 'passed="[0-9]*"' "$f" | head -1 | tr -dc '0-9')
           echo "${{ matrix.name }}: total=$total passed=$passed"
-          [ "${total:-0}" -ge 28 ] || { echo "::error::only ${total:-0} tests ran; expected at least 28"; exit 1; }
+          [ "${total:-0}" -ge 29 ] || { echo "::error::only ${total:-0} tests ran; expected at least 29"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         if: always()
