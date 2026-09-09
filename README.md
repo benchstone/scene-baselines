@@ -14,6 +14,8 @@ and tells you precisely what differs from the last state you agreed was correct.
 - **Runs in CI.** One command, a meaningful exit code, and a markdown report.
 - **Reads like objects, not YAML.** `Player/Sprite → BoxCollider2D.size` instead of four thousand
   lines of scene diff full of file IDs.
+- **Proves itself on your history.** Replay past commits and read what it would have caught at
+  the time — before you record a single baseline. [How](#see-what-it-would-have-caught).
 
 ## Install
 
@@ -41,6 +43,64 @@ known-good.
 
 There is deliberately **no Reject button**: walking away already rejects, and the check stays red
 until the scene actually matches.
+
+## See what it would have caught
+
+A tool like this normally asks you to take its word for it: record a baseline, wait, and maybe one
+day it catches something. Replay answers now, out of your own repository. It walks back through
+your history, records each commit's parent as known-good, checks the commit against it, and reports
+what it would have told you at the time.
+
+```bash
+Tools~/replay-history.sh --project <path to a clone> --unity <path/to/Unity> \
+      --commits 10 --scene Assets/Scenes/Level_01.unity --out ~/replay
+```
+
+> **Point it at a throwaway clone, not the repository you work in.** A replay checks commits out
+> one at a time, because a scene can only be captured by an editor that has it open. It refuses
+> to start when a tracked file has uncommitted changes, when a scene is unsaved, or in Play Mode;
+> it puts your branch back when it finishes or is interrupted; and it writes its baselines,
+> report and state outside the project entirely. A clone makes all of that moot, and it also
+> settles the one thing a checkout cannot: untracked files stay put through every checkout, so
+> they are present at commits that predate them. `git clone <your repo> ../replay-clone` costs a
+> minute.
+
+The script ships with the package: `Tools~/replay-history.sh` in a clone of this repository, or
+`Library/PackageCache/com.benchstone.scenebaselines@*/Tools~/` when it was installed through the
+Package Manager. Bash today; on Windows, Git Bash comes with Git for Windows.
+
+**What it costs.** About a minute per commit, and the first launch also imports the project, which
+on a large one takes considerably longer than that. `--commits 10` counts commits *worth
+replaying*: a commit that changed nothing your scenes depend on cannot have changed how they look,
+so it is never opened. On a real project that is most of them — `--scan` bounds how far back to
+look, and `--all-commits` replays every one regardless.
+
+**What comes out** is one markdown file, newest commit first:
+
+```
+## `f90779a7` fix: Moving utp to component instead of child GameObject (#752)
+
+Compared against its parent `1a267a99` — **91 finding(s)**.
+
+Scope: 2 file(s) changed, 2 of them file(s) these scene(s) depend on — 45 object(s) and
+2 asset(s) differ.
+```
+
+The `Scope:` line is there because "45 object(s) differ" means nothing on its own. A three-hundred
+file refactor that moves a lot of scene is ordinary; a two-file commit that does is the shape of a
+change nobody knew they were making. It is context and not a score — findings are never reordered,
+and nothing is ever hidden.
+
+**Two things to know before you read one.** A quiet report is the correct answer, not a failure:
+most commits change nothing about how a scene looks. And a finding is a real difference, not
+necessarily a mistake — most changes in any history were intended, and no tool can know which. What
+it can do is surface the ones that landed where nobody was looking. On a real open-source game it
+reported a regression that arrived through a prefab, in a scene whose own diff was empty.
+
+Project-wide settings — tags, layers, physics, quality — are not compared during a replay. Unity
+reads them once per session instead of importing them like assets, so after a checkout the editor's
+view of them can still belong to a different commit. Every report says so, and says how many
+findings it set aside. An ordinary check compares them as usual.
 
 ## What it covers
 
