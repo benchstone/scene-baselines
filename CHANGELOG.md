@@ -4,6 +4,35 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-09-10
+
+### Added
+
+- **The Review Findings window narrows.** A check on a real scene reports more findings than
+  anyone reads in one column, and until now the only way through was to scroll. The toolbar now
+  filters by kind (only MISSING, only MOVED), by what actually differs (only the objects whose
+  `BoxCollider` properties changed, only the ones whose children were reordered) and by path.
+
+  Every filter is a fact the finding already carries — its kind, its path, the named segments of
+  state that differ — and every menu entry is built from the findings in front of you and carries
+  its own count, so a choice never comes back empty and no difference can fall outside the menu.
+
+  There is deliberately **no "only real regressions" filter** and there cannot be one: that needs a
+  classifier of intent, which cannot exist, and hiding by a guess fails worse than ordering by one.
+  A mis-ranked finding is three lines further down the page; a mis-classified one is behind a
+  button nobody clicks.
+
+  Nothing is hidden quietly. The header prints how many findings there are beside how many are
+  shown, a section emptied by a filter says so instead of saying nothing is wrong, and a finding
+  ticked before a filter narrowed is still ticked, still counted on the Accept button, and says so.
+
+### Changed
+
+- **The window's header counts what the window lists.** It was reporting every finding in the run,
+  including the same change seen by three baselines — so it could say 45 above a list of 17. It now
+  counts what is actually on the page, and a scene with no comparable baseline reads "nothing
+  compared" rather than "nothing differs", which is the distinction this tool exists to keep.
+
 ## [0.6.0] — 2026-09-09
 
 ### Added

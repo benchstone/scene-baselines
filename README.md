@@ -41,6 +41,13 @@ In **Review Findings**, each difference has a `Select` button that highlights th
 Hierarchy, and a checkbox. `Accept checked as intentional` rewrites those records as the new
 known-good.
 
+A long list narrows from the toolbar: by kind (only what is missing, only what moved), by what
+changed (only the objects whose `BoxCollider` properties differ, only the ones whose children were
+reordered), and by path. Every one of those is a fact the finding already carries, and the window
+always prints how many findings there are beside how many it is showing — a filter can never make a
+broken scene look clean. There is no "only real regressions" filter, because whether a change was
+intended is the one thing this package cannot know.
+
 There is deliberately **no Reject button**: walking away already rejects, and the check stays red
 until the scene actually matches.
 
@@ -160,12 +167,12 @@ Read them with `git diff --word-diff`; the state is one long line per object.
 **Window ▸ General ▸ Test Runner ▸ EditMode.** The suite runs against throwaway objects — no
 Play Mode, no scene of yours is touched, nothing is written.
 
-Twenty-nine groups, and all twenty-nine run — in the Test Runner and in CI alike. Four of them
+Thirty-one groups, and all thirty-one run — in the Test Runner and in CI alike. Four of them
 need a saved scene to work on. Rather than skip, they use the scene you already have open, and
 otherwise create a temporary one and put your scene setup back afterwards. If anything in the editor
 has unsaved changes they refuse to run at all, rather than risk discarding it.
 
-The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same twenty-nine
+The menu entry **Scene Baselines ▸ Tests ▸ Property Capture (free)** runs the same thirty-one
 against whatever scene you have open.
 
 ### What CI checks
@@ -174,11 +181,11 @@ against whatever scene you have open.
 `.cs` and folder has a `.meta`, that no `.meta` is orphaned, that `package.json` agrees with the
 changelog, and that `Editor/` makes no network calls — that last one guards a claim this README makes.
 
-**Then it runs all twenty-nine EditMode tests on real editors**, headless on Linux, against minimal
+**Then it runs all thirty-one EditMode tests on real editors**, headless on Linux, against minimal
 projects under `CI~/` that install this package by relative path — once on **Unity 6** and once on
 **2021.3 LTS**, the floor this package claims support for. A green badge means the structure checks
-and both runs of the twenty-nine tests passed, on hardware that is not the author's. CI also
-asserts that each run actually contained twenty-nine tests, because a run that discovers none would
+and both runs of the thirty-one tests passed, on hardware that is not the author's. CI also
+asserts that each run actually contained thirty-one tests, because a run that discovers none would
 otherwise pass while proving nothing.
 
 One honest caveat: a fork cannot see the repository's Unity credentials, and GitHub does not pass

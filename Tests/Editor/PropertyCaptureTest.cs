@@ -101,6 +101,7 @@ namespace SceneBaselines
         [Test, Order(28)] public void Commits_are_chosen_by_what_the_scenes_depend_on() => Verify(CheckCommitsAreChosenByWhatTheScenesDependOn);
         [Test, Order(29)] public void A_commit_says_how_far_it_reached() => Verify(CheckCommitScopeIsStated);
         [Test, Order(30)] public void A_replay_report_leads_with_findings() => Verify(CheckReplayReportLeadsWithFindings);
+        [Test, Order(31)] public void A_filter_narrows_on_facts_and_hides_nothing_silently() => Verify(CheckReviewFilterNarrowsOnFacts);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -313,6 +314,7 @@ namespace SceneBaselines
                 failures += CheckCommitsAreChosenByWhatTheScenesDependOn();
                 failures += CheckCommitScopeIsStated();
                 failures += CheckReplayReportLeadsWithFindings();
+                failures += CheckReviewFilterNarrowsOnFacts();
             }
             finally
             {
@@ -2119,6 +2121,149 @@ namespace SceneBaselines
         private static RegressionReport.ReportFinding Finding(string kind, string path)
         {
             return new RegressionReport.ReportFinding { kind = kind, path = path };
+        }
+
+        /// <remarks>
+        /// The review window can now be narrowed, and a filter is the most dangerous thing this
+        /// tool has shipped: a check whose whole promise is "you will be told" acquiring a control
+        /// that stops it telling you. So the assertions below are in two halves.
+        ///
+        /// The first half is that every filter is a FACT the finding already carries — its kind, its
+        /// path, the named segments of state that differ. Nothing is inferred, nothing is scored,
+        /// and there is no filter for "real regressions": that needs a classifier of intent which
+        /// cannot exist, and hiding by it would fail worse than mis-ordering by it.
+        ///
+        /// The second half is the one that keeps the promise: NOTHING GOES MISSING QUIETLY. An
+        /// empty filter is the identity, a filter only ever removes, and — the property the window
+        /// leans on hardest — every finding that names a segment is reachable through a menu entry,
+        /// because the menu is built out of the findings themselves rather than out of a list of
+        /// categories someone wrote down. A category list is exactly how a difference ends up in no
+        /// bucket at all and disappears from a window that still says it is showing everything.
+        /// </remarks>
+        private static int CheckReviewFilterNarrowsOnFacts()
+        {
+            int failures = 0;
+
+            var moved = new RegressionFinding
+            {
+                path = "Level/Enemies/Grunt",
+                livePath = "Level/Pool/Grunt",
+                kind = RegressionKind.Moved,
+                changedSegments = new List<string> { "pos: (0.0,0.0,0.0) → (3.0,0.0,0.0)" }
+            };
+
+            var missing = new RegressionFinding
+            {
+                path = "Level/Enemies/Boss",
+                kind = RegressionKind.Missing
+            };
+
+            var trigger = new RegressionFinding
+            {
+                path = "Level/Walls/Wall",
+                kind = RegressionKind.Changed,
+                changedSegments = new List<string>
+                {
+                    "props:BoxCollider.isTrigger: false → true",
+                    "props:BoxCollider.size: (1.0,1.0,1.0) → (2.0,1.0,1.0)"
+                }
+            };
+
+            var stretched = new RegressionFinding
+            {
+                path = "Level/Walls/Pillar",
+                kind = RegressionKind.Changed,
+                changedSegments = new List<string>
+                {
+                    "scale: (1.0,1.0,1.0) → (1.0,4.0,1.0)",
+                    "bounds.center: (0.0,0.5,0.0) → (0.0,2.0,0.0)"
+                }
+            };
+
+            var all = new List<RegressionFinding> { moved, missing, trigger, stretched };
+            var filter = new ReviewFilter();
+
+            // ── An empty filter is the window as it was ──────────────────────────
+            failures += Held("nothing chosen hides nothing",
+                !filter.IsActive && filter.Apply(all).SequenceEqual(all));
+
+            // ── Kind: a fact on every finding ────────────────────────────────────
+            filter.kind = RegressionKind.Missing;
+            List<RegressionFinding> onlyMissing = filter.Apply(all);
+
+            failures += Held("choosing a kind shows that kind", onlyMissing.Count == 1 && onlyMissing[0] == missing);
+            failures += Held("and choosing one is hiding something", filter.IsActive);
+
+            filter.Clear();
+            failures += Held("clearing puts everything back", !filter.IsActive && filter.Apply(all).Count == all.Count);
+
+            // ── Detail: the segment the difference is actually under ─────────────
+            filter.detail = "props:BoxCollider";
+            List<RegressionFinding> onlyCollider = filter.Apply(all);
+
+            failures += Held("a component's properties are one choice, not one per property",
+                onlyCollider.Count == 1 && onlyCollider[0] == trigger);
+
+            filter.detail = "bounds";
+            failures += Held("a narrowed field is filed under the segment it came from",
+                filter.Apply(all).SequenceEqual(new List<RegressionFinding> { stretched }));
+
+            filter.Clear();
+
+            // The keys themselves, since the menu is nothing but these.
+            failures += Held("a repeated segment is not a second entry",
+                ReviewFilter.SegmentKey("props:Sprite#2.color: white → red") == "props:Sprite");
+            failures += Held("a plain segment keeps its own name",
+                ReviewFilter.SegmentKey("pos: (0.0,0.0,0.0) → (3.0,0.0,0.0)") == "pos");
+            failures += Held("a component reads as its properties in a menu",
+                ReviewFilter.DescribeDetail("props:BoxCollider") == "BoxCollider properties");
+            failures += Held("and anything else is spelled as the report spells it",
+                ReviewFilter.DescribeDetail("children") == "children");
+
+            // ── Path: what the reviewer types ────────────────────────────────────
+            filter.path = "  walls  ";
+            List<RegressionFinding> onlyWalls = filter.Apply(all);
+
+            failures += Held("a path search ignores case and stray spaces",
+                onlyWalls.Count == 2 && onlyWalls.Contains(trigger) && onlyWalls.Contains(stretched));
+
+            filter.path = "Pool";
+            List<RegressionFinding> byWhereItWent = filter.Apply(all);
+
+            failures += Held("a moved object is findable where it went, not only where it was",
+                byWhereItWent.Count == 1 && byWhereItWent[0] == moved);
+
+            filter.Clear();
+
+            // ── Nothing goes missing quietly ─────────────────────────────────────
+            List<KeyValuePair<string, int>> keys = ReviewFilter.DetailKeys(all);
+
+            failures += Held("the menu is built out of the differences themselves",
+                keys.Any(k => k.Key == "pos") && keys.Any(k => k.Key == "props:BoxCollider") &&
+                keys.Any(k => k.Key == "scale") && keys.Any(k => k.Key == "bounds"));
+
+            failures += Held("a finding differing in two segments counts once under each, not half",
+                keys.First(k => k.Key == "scale").Value == 1 &&
+                keys.First(k => k.Key == "bounds").Value == 1);
+
+            failures += Held("no menu entry is offered that would come back empty",
+                keys.All(k => new ReviewFilter { detail = k.Key }.Apply(all).Count == k.Value));
+
+            // The property the window's honesty rests on: no difference falls outside the menu.
+            failures += Held("every finding that names a segment is reachable from the menu",
+                all.Where(f => f.changedSegments.Count > 0)
+                   .All(f => keys.Any(k => new ReviewFilter { detail = k.Key }.Apply(all).Contains(f))));
+
+            // And the one that cannot be: a finding with nothing named under it is excluded by any
+            // segment choice, which is why the window keeps printing the unfiltered count as well.
+            failures += Held("a finding with no named difference is not silently filed somewhere",
+                keys.All(k => !new ReviewFilter { detail = k.Key }.Apply(all).Contains(missing)));
+
+            failures += Held("a filter can only ever remove",
+                new ReviewFilter { kind = RegressionKind.Changed, path = "Wall" }
+                    .Apply(all).All(all.Contains));
+
+            return failures;
         }
 
         /// <remarks>

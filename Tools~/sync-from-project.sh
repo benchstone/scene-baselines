@@ -33,7 +33,7 @@ fi
 ITEMS=(Editor Tests package.json package.json.meta Editor.meta Tests.meta
        README.md README.md.meta LICENSE.md LICENSE.md.meta
        CHANGELOG.md CHANGELOG.md.meta
-       Tools~/replay-history.sh)
+       Tools~/replay-history.sh Tools~/replay-history.ps1)
 
 drift=0
 for item in "${ITEMS[@]}"; do

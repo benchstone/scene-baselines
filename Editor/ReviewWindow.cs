@@ -28,6 +28,10 @@ namespace SceneBaselines
     // match — repeats collapse into a count on it, and older baselines get a section only for what
     // they alone still catch. Nothing is dropped; it is said once.
     //
+    // A long list is narrowed with the controls under the toolbar, and every one of them filters on
+    // a fact the finding already carries — see ReviewFilter, which also says why there is no button
+    // labelled "regressions" and why every count on screen is printed beside the count it came from.
+    //
     // 🚨 No Reject button, on purpose: walking away already rejects. Nothing is written, the check
     // stays red, and it stays red until the scene actually matches. Silence must mean "not accepted",
     // because the alternative is a button whose only use is to silence a finding without fixing it.
@@ -42,6 +46,16 @@ namespace SceneBaselines
         // Reference identity, so a checkbox follows its finding without needing an index that a
         // re-check would invalidate.
         private readonly HashSet<RegressionFinding> selected = new HashSet<RegressionFinding>();
+
+        // What the reviewer has narrowed the list to. Survives a re-check on purpose: someone who
+        // filtered to "MISSING under Enemies/", fixed one and pressed Re-check is asking whether the
+        // rest are still missing, not to be dropped back into the full list. See ReviewFilter for
+        // the two rules every control here obeys.
+        private readonly ReviewFilter filter = new ReviewFilter();
+
+        // The findings actually put on screen this frame, by key, so the Accept bar can say when
+        // something ticked is behind a filter rather than leave its count unexplained.
+        private readonly HashSet<string> drawnKeys = new HashSet<string>(StringComparer.Ordinal);
 
         [MenuItem("Scene Baselines/Review Findings")]
         public static void Open()
@@ -59,6 +73,8 @@ namespace SceneBaselines
 
         private void OnGUI()
         {
+            drawnKeys.Clear();
+
             DrawToolbar();
 
             // Findings do not survive a domain reload, and inventing them back would be worse than
@@ -127,13 +143,164 @@ namespace SceneBaselines
             GUILayout.FlexibleSpace();
 
             if (result != null)
+                GUILayout.Label(DescribeCount());
+
+            EditorGUILayout.EndHorizontal();
+
+            DrawFilterBar();
+        }
+
+        /// <summary>
+        /// What this window is showing, and out of how much.
+        /// </summary>
+        /// <remarks>
+        /// The total is printed whether or not a filter is on. A reviewer who cannot see the number
+        /// being filtered out cannot tell a clean scene from a narrow filter, and that confusion is
+        /// the whole risk of having filters at all.
+        ///
+        /// Counted over what this window LISTS — the newest baseline's findings plus what only older
+        /// baselines still catch — rather than over every finding in the run. Those differ: the same
+        /// change reported by three baselines is three findings in the result and one line here, and
+        /// a header that says 45 above a list of 17 reads as a bug in the tool.
+        /// </remarks>
+        private string DescribeCount()
+        {
+            // Not "nothing differs": nothing was compared, which is the one thing this tool may
+            // never let read as a pass.
+            if (result.sceneWasUnsaved || !result.HasBaselines)
+                return $"{result.sceneName} — nothing compared";
+
+            List<RegressionFinding> listed = ListedFindings();
+
+            if (listed.Count == 0)
+                return $"{result.sceneName} — nothing differs";
+
+            return filter.IsActive
+                ? $"{result.sceneName} — showing {filter.Apply(listed).Count} of {listed.Count} finding(s)"
+                : $"{result.sceneName} — {listed.Count} finding(s)";
+        }
+
+        /// <summary>
+        /// The narrowing controls, and the one place a filter is chosen.
+        /// </summary>
+        /// <remarks>
+        /// Every option is built from the findings in front of the reviewer and carries its own
+        /// count, so a choice can never come back empty and no bucket is offered that the findings
+        /// do not fill. There is deliberately no "only regressions" control — see ReviewFilter.
+        /// </remarks>
+        private void DrawFilterBar()
+        {
+            if (result == null || result.sceneWasUnsaved || !result.HasBaselines)
+                return;
+
+            List<RegressionFinding> listed = ListedFindings();
+
+            // A row of dead menus over an empty list is noise, and a filter cannot help anyone read
+            // a list of nothing.
+            if (listed.Count == 0)
+                return;
+
+            EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+
+            GUILayout.Label("Show", EditorStyles.miniLabel, GUILayout.Width(34f));
+
+            DrawKindMenu(listed);
+            DrawDetailMenu(listed);
+
+            GUILayout.Label("path", EditorStyles.miniLabel, GUILayout.Width(28f));
+            filter.path = EditorGUILayout.TextField(
+                filter.path ?? "", EditorStyles.toolbarSearchField, GUILayout.MinWidth(70f));
+
+            using (new EditorGUI.DisabledScope(!filter.IsActive))
             {
-                GUILayout.Label(result.TotalFindings == 0
-                    ? $"{result.sceneName} — nothing differs"
-                    : $"{result.sceneName} — {result.TotalFindings} finding(s)");
+                if (GUILayout.Button("Clear", EditorStyles.toolbarButton, GUILayout.Width(46f)))
+                {
+                    filter.Clear();
+                    GUI.FocusControl(null);
+                }
             }
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawKindMenu(List<RegressionFinding> listed)
+        {
+            var kinds = new List<RegressionKind>();
+
+            foreach (RegressionFinding finding in listed)
+            {
+                if (!kinds.Contains(finding.kind))
+                    kinds.Add(finding.kind);
+            }
+
+            kinds.Sort();
+
+            // A chosen kind stays on the menu even when a re-check leaves none of it — which is the
+            // moment it matters most, because "0 of 12" is the reviewer's answer that the thing they
+            // were watching is fixed. Dropping them back to every kind would answer a different
+            // question and look like the filter failing.
+            if (filter.kind.HasValue && !kinds.Contains(filter.kind.Value))
+                kinds.Add(filter.kind.Value);
+
+            var labels = new List<string> { $"All kinds ({listed.Count})" };
+
+            foreach (RegressionKind kind in kinds)
+                labels.Add($"{KindLabel(kind).Trim()} ({listed.Count(f => f.kind == kind)})");
+
+            int chosen = filter.kind.HasValue ? kinds.IndexOf(filter.kind.Value) + 1 : 0;
+            int picked = EditorGUILayout.Popup(chosen, labels.ToArray(),
+                EditorStyles.toolbarPopup, GUILayout.Width(118f));
+
+            filter.kind = picked <= 0 ? (RegressionKind?)null : kinds[picked - 1];
+        }
+
+        private void DrawDetailMenu(List<RegressionFinding> listed)
+        {
+            List<KeyValuePair<string, int>> details = ReviewFilter.DetailKeys(listed);
+
+            if (filter.detail != null && !details.Any(d => string.Equals(d.Key, filter.detail, StringComparison.Ordinal)))
+                details.Add(new KeyValuePair<string, int>(filter.detail, 0));
+
+            // MISSING and ADDED findings name no segment, so a scene that only lost objects has
+            // nothing to offer here. An empty menu would be a control that cannot be used.
+            if (details.Count == 0)
+                return;
+
+            var labels = new List<string> { "Any change" };
+
+            foreach (KeyValuePair<string, int> detail in details)
+                labels.Add($"{ReviewFilter.DescribeDetail(detail.Key)} ({detail.Value})");
+
+            int chosen = filter.detail == null
+                ? 0
+                : details.FindIndex(d => string.Equals(d.Key, filter.detail, StringComparison.Ordinal)) + 1;
+
+            int picked = EditorGUILayout.Popup(chosen, labels.ToArray(),
+                EditorStyles.toolbarPopup, GUILayout.Width(168f));
+
+            filter.detail = picked <= 0 ? null : details[picked - 1].Key;
+        }
+
+        /// <summary>
+        /// Every finding this window would list with no filter on: the current known-good's, plus
+        /// the ones only an older baseline still reports. Deduplicated exactly as the sections are.
+        /// </summary>
+        private List<RegressionFinding> ListedFindings()
+        {
+            var listed = new List<RegressionFinding>();
+
+            if (result == null)
+                return listed;
+
+            List<BaselineComparison> comparable = result.comparisons.Where(c => c.IsComparable).ToList();
+
+            if (comparable.Count == 0)
+                return listed;
+
+            listed.AddRange(comparable[0].findings);
+            listed.AddRange(OnlyInOlder(comparable[0], comparable.Skip(1).ToList()).Select(e => e.Value));
+
+            return listed;
         }
 
         /// <summary>
@@ -155,7 +322,26 @@ namespace SceneBaselines
                 return;
             }
 
-            foreach (RegressionFinding finding in current.findings)
+            List<RegressionFinding> visible = filter.Apply(current.findings);
+
+            // Never "still holds" when a filter is the only reason there is nothing to show. A
+            // window that reads as clean because of a menu setting is the one failure this feature
+            // is not allowed to have.
+            if (visible.Count == 0)
+            {
+                EditorGUILayout.LabelField(
+                    $"   {current.findings.Count} finding(s) here, none of them matching the filter");
+                return;
+            }
+
+            if (visible.Count < current.findings.Count)
+            {
+                EditorGUILayout.LabelField(
+                    $"   showing {visible.Count} of {current.findings.Count} finding(s)",
+                    EditorStyles.miniLabel);
+            }
+
+            foreach (RegressionFinding finding in visible)
                 DrawFinding(finding, EchoCount(finding, older));
         }
 
@@ -175,12 +361,57 @@ namespace SceneBaselines
         /// </remarks>
         private void DrawOnlyInOlder(BaselineComparison current, List<BaselineComparison> older)
         {
-            if (older.Count == 0)
+            List<KeyValuePair<BaselineComparison, RegressionFinding>> extras = OnlyInOlder(current, older);
+
+            if (extras.Count == 0)
                 return;
+
+            EditorGUILayout.Space(10f);
+            EditorGUILayout.LabelField(
+                $"ALSO BROKEN AGAINST OLDER BASELINES — {extras.Count} finding(s)",
+                EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                "The current known-good does not report these: it was recorded when they were " +
+                "already true, so it cannot see them. An older baseline still can.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            List<KeyValuePair<BaselineComparison, RegressionFinding>> visible =
+                extras.Where(e => filter.Matches(e.Value)).ToList();
+
+            // The heading is printed above whatever the filter leaves, including nothing. A section
+            // that vanishes under a filter takes its count with it, and the count is the point.
+            if (visible.Count < extras.Count)
+            {
+                EditorGUILayout.LabelField(
+                    visible.Count == 0
+                        ? "   none of them matching the filter"
+                        : $"   showing {visible.Count} of {extras.Count}",
+                    EditorStyles.miniLabel);
+            }
+
+            foreach (KeyValuePair<BaselineComparison, RegressionFinding> extra in visible)
+            {
+                DrawFinding(extra.Value, 0);
+                EditorGUILayout.LabelField(
+                    "      from " + extra.Key.baseline?.DescribeAge(), EditorStyles.miniLabel);
+            }
+        }
+
+        /// <summary>
+        /// The findings only OLDER baselines still report, each paired with the newest baseline
+        /// that reports it. Deduplicated, so one lost object is one entry however many baselines
+        /// remember it.
+        /// </summary>
+        private static List<KeyValuePair<BaselineComparison, RegressionFinding>> OnlyInOlder(
+            BaselineComparison current, List<BaselineComparison> older)
+        {
+            var extras = new List<KeyValuePair<BaselineComparison, RegressionFinding>>();
+
+            if (older == null || older.Count == 0)
+                return extras;
 
             var currentKeys = new HashSet<string>(current.findings.Select(Key));
             var shown = new HashSet<string>();
-            var extras = new List<KeyValuePair<BaselineComparison, RegressionFinding>>();
 
             foreach (BaselineComparison comparison in older)
             {
@@ -197,24 +428,7 @@ namespace SceneBaselines
                 }
             }
 
-            if (extras.Count == 0)
-                return;
-
-            EditorGUILayout.Space(10f);
-            EditorGUILayout.LabelField(
-                $"ALSO BROKEN AGAINST OLDER BASELINES — {extras.Count} finding(s)",
-                EditorStyles.boldLabel);
-            EditorGUILayout.LabelField(
-                "The current known-good does not report these: it was recorded when they were " +
-                "already true, so it cannot see them. An older baseline still can.",
-                EditorStyles.wordWrappedMiniLabel);
-
-            foreach (KeyValuePair<BaselineComparison, RegressionFinding> extra in extras)
-            {
-                DrawFinding(extra.Value, 0);
-                EditorGUILayout.LabelField(
-                    "      from " + extra.Key.baseline?.DescribeAge(), EditorStyles.miniLabel);
-            }
+            return extras;
         }
 
         /// <summary>
@@ -288,6 +502,8 @@ namespace SceneBaselines
 
         private void DrawFinding(RegressionFinding finding, int echoCount)
         {
+            drawnKeys.Add(Key(finding));
+
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.BeginHorizontal();
 
@@ -385,6 +601,19 @@ namespace SceneBaselines
             EditorGUILayout.LabelField(
                 "Accepting records the current state as known-good. It never changes your scene — " +
                 "use undo or version control to put something back.", EditorStyles.wordWrappedMiniLabel);
+
+            // A filter changes what is on screen and nothing else: a finding ticked before the
+            // filter narrowed is still ticked and will still be accepted. Said out loud, because the
+            // alternative is a button whose number does not match the list above it — and the way
+            // that gets "fixed" by a user is by accepting a change they can no longer see.
+            int hidden = selected.Select(Key).Distinct().Count(k => !drawnKeys.Contains(k));
+
+            if (hidden > 0)
+            {
+                EditorGUILayout.LabelField(
+                    $"{hidden} checked finding(s) are hidden by the filter — Accept still covers them. " +
+                    "Clear the filter to see them.", EditorStyles.wordWrappedMiniLabel);
+            }
 
             using (new EditorGUI.DisabledScope(selected.Count == 0))
             {
