@@ -44,8 +44,8 @@ known-good.
 Objects you have built since the baseline was recorded are listed separately, under **ADDED SINCE**.
 They are not findings — adding a GameObject is not breakage, and it never fails a check or a build.
 They are there because until an object is in the baseline, nothing is watching it: tick one and it
-is recorded as known-good from that moment, and everything else in the baseline is left exactly as
-it was. Growing a baseline object by object is the point; re-recording the whole scene would adopt
+is recorded as known-good from that moment, along with its place in the Hierarchy, and everything
+else in the baseline is left exactly as it was. Growing a baseline object by object is the point; re-recording the whole scene would adopt
 every other difference in it at the same time, including the ones nobody read.
 
 A long list narrows from the toolbar: by kind (only what is missing, only what moved), by what

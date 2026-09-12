@@ -1579,7 +1579,7 @@ namespace SceneBaselines
         }
 
         /// <summary>Removes the characters that would break the state string's own structure.</summary>
-        private static string Sanitise(string raw)
+        internal static string Sanitise(string raw)
         {
             if (string.IsNullOrEmpty(raw))
                 return "_";

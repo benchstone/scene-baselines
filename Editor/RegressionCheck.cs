@@ -135,6 +135,31 @@ namespace SceneBaselines
 
         /// <summary>The differing parts only — a full state string is unreadable in a report.</summary>
         public List<string> changedSegments = new List<string>();
+
+        /// <summary>
+        /// For an ADDED or MOVED object: whose ordered list it sits in now —
+        /// <see cref="RegressionCheck.RootOrderKey"/> for a top-level object, otherwise its parent's
+        /// live path. Null for every other kind.
+        /// </summary>
+        /// <remarks>
+        /// Carried so accepting an object can also record WHERE it sits. Without it the object's own
+        /// record is written but the root order (or its parent's child list) never learns its name,
+        /// and dragging it to the top of the Hierarchy afterwards is silent, because the names the
+        /// list does know are still in order.
+        /// </remarks>
+        public string liveOrderOwner;
+
+        /// <summary>The live parent's identity, so a renamed or moved parent is still found.</summary>
+        public string liveOrderOwnerId;
+
+        /// <summary>The live ordered list the object sits in, names as capture writes them.</summary>
+        public List<string> liveOrderNames = new List<string>();
+
+        /// <summary>
+        /// The object's position in <see cref="liveOrderNames"/>, or -1 when it could not be told
+        /// apart from a sibling with the same written name.
+        /// </summary>
+        public int liveOrderIndex = -1;
     }
 
     public class BaselineComparison
@@ -449,6 +474,11 @@ namespace SceneBaselines
 
             AddSuspiciousAdditions(comparison, baseline, added, live);
             OfferAdditionsForAdoption(comparison, added);
+
+            foreach (RegressionFinding arrival in comparison.findings
+                         .Where(f => f.kind == RegressionKind.Added || f.kind == RegressionKind.Moved)
+                         .Concat(comparison.newObjects))
+                LocateInLiveOrder(arrival, live, liveSettings);
 
             CompareAssets(comparison, baseline, liveAssets);
             CompareSettings(comparison, baseline, liveSettings);
@@ -870,7 +900,7 @@ namespace SceneBaselines
         }
 
         /// <summary>The names inside a "children=(a,b,c)" style segment.</summary>
-        private static List<string> ListedNames(string segment)
+        internal static List<string> ListedNames(string segment)
         {
             if (string.IsNullOrEmpty(segment))
                 return new List<string>();
@@ -899,6 +929,218 @@ namespace SceneBaselines
             }
 
             return next == recorded.Count;
+        }
+
+        /// <summary>The settings key of the scene's top-level order.</summary>
+        public const string RootOrderKey = "scene/rootOrder";
+
+        /// <summary>"+12-more", the tail capture writes when a list is cut short.</summary>
+        internal static bool IsTruncationMarker(string name)
+        {
+            return name.StartsWith("+", StringComparison.Ordinal) &&
+                   name.EndsWith("-more", StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// "Level/Grunt#2" → owner "Level", name "Grunt", twin 2. A top-level path has a null owner;
+        /// a path without a "#n" suffix is twin 1.
+        /// </summary>
+        internal static void SplitPath(string path, out string owner, out string name, out int twin)
+        {
+            path = path ?? "";
+
+            int slash = path.LastIndexOf('/');
+            owner = slash >= 0 ? path.Substring(0, slash) : null;
+            name = path.Substring(slash + 1);
+            twin = 1;
+
+            int hash = name.LastIndexOf('#');
+            if (hash <= 0 || hash == name.Length - 1)
+                return;
+
+            string digits = name.Substring(hash + 1);
+            if (digits.All(char.IsDigit) && int.TryParse(digits, out int n) && n > 0)
+            {
+                name = name.Substring(0, hash);
+                twin = n;
+            }
+        }
+
+        /// <summary>
+        /// Notes which ordered list an added or moved object sits in now, and where, so that
+        /// accepting it can give it a place in that list as well as a record of its own.
+        /// </summary>
+        /// <remarks>
+        /// Worked out from names, because names are all a list holds — and names repeat. The "#n"
+        /// suffix says which same-named sibling a path is, but two different names can also be
+        /// written identically once capture sanitises them ("Door A" and "Door_A"). When the list
+        /// holds the written name more often than there are siblings with exactly this name, the
+        /// position would be a guess, so the index stays -1 and accept says it could not place it.
+        /// </remarks>
+        private static void LocateInLiveOrder(RegressionFinding finding,
+            List<BaselineObjectRecord> live, List<BaselineSettingsRecord> liveSettings)
+        {
+            string path = finding.livePath ?? finding.path ?? "";
+            if (path.Length == 0 || live == null)
+                return;
+
+            SplitPath(path, out string ownerPath, out string name, out int twin);
+            string list = null;
+
+            if (ownerPath == null)
+            {
+                finding.liveOrderOwner = RootOrderKey;
+                list = liveSettings?
+                    .FirstOrDefault(s => SettingsKey(s.scope, s.group) == RootOrderKey)?.state;
+            }
+            else
+            {
+                BaselineObjectRecord parent = live.FirstOrDefault(r =>
+                    string.Equals(r.path ?? "", ownerPath, StringComparison.Ordinal));
+
+                if (parent == null)
+                    return;
+
+                finding.liveOrderOwner = ownerPath;
+                finding.liveOrderOwnerId = parent.id ?? "";
+                list = StateSegment(parent.state, "children");
+            }
+
+            if (string.IsNullOrEmpty(list))
+                return;
+
+            List<string> names = ListedNames(list);
+            finding.liveOrderNames = names;
+
+            if (names.Any(IsTruncationMarker))
+                return;
+
+            int siblingsWithThisName = live.Count(r =>
+            {
+                SplitPath(r.path, out string otherOwner, out string otherName, out _);
+                return string.Equals(otherOwner, ownerPath, StringComparison.Ordinal) &&
+                       string.Equals(otherName, name, StringComparison.Ordinal);
+            });
+
+            List<int> positions = PositionsOf(names, SceneCapture.Sanitise(name));
+
+            if (positions.Count != siblingsWithThisName || twin > positions.Count)
+                return;
+
+            finding.liveOrderIndex = positions[twin - 1];
+        }
+
+        /// <summary>Every index at which a list holds this written name.</summary>
+        internal static List<int> PositionsOf(List<string> names, string written)
+        {
+            var positions = new List<int>();
+
+            for (int i = 0; i < names.Count; i++)
+            {
+                if (string.Equals(names[i], written, StringComparison.Ordinal))
+                    positions.Add(i);
+            }
+
+            return positions;
+        }
+
+        /// <summary>
+        /// A recorded list with one live name added where it sits now, the list unchanged when the
+        /// name is already accounted for, or null when its place cannot be worked out.
+        /// </summary>
+        /// <remarks>
+        /// 🚨 Inserts ONE name and never copies the live list. The live list also carries every other
+        /// change to this order that nobody has reviewed — a reorder, other new objects — and copying
+        /// it would adopt all of them under a tick that was about one object.
+        ///
+        /// The newcomer goes in front of the first recorded name that follows it in the live list.
+        /// When the recorded names are no longer in live order — a reorder is still waiting for
+        /// review — there is no honest "in front of", so it refuses rather than pick a place.
+        /// </remarks>
+        internal static List<string> InsertIntoOrder(List<string> recordedNames, List<string> liveNames,
+            int liveIndex)
+        {
+            if (recordedNames == null || liveNames == null ||
+                liveIndex < 0 || liveIndex >= liveNames.Count ||
+                recordedNames.Any(IsTruncationMarker))
+                return null;
+
+            var recorded = new List<string>(recordedNames);
+
+            // Where each recorded name sits in the live list, the newcomer's own slot left out.
+            var at = new List<int>(recorded.Count);
+            int next = 0;
+
+            foreach (string name in recorded)
+            {
+                while (next < liveNames.Count &&
+                       (next == liveIndex || !string.Equals(liveNames[next], name, StringComparison.Ordinal)))
+                    next++;
+
+                if (next == liveNames.Count)
+                {
+                    // Recorded names only fit the live order by using the newcomer's slot: it is in
+                    // the list already, e.g. its parent was adopted first in the same accept.
+                    return IsSubsequence(recorded, liveNames) ? recorded : null;
+                }
+
+                at.Add(next++);
+            }
+
+            int insertAt = at.FindIndex(position => position > liveIndex);
+            recorded.Insert(insertAt < 0 ? recorded.Count : insertAt, liveNames[liveIndex]);
+
+            return recorded;
+        }
+
+        /// <summary>The top-level segment of a state with this key, e.g. "children=(A,B)", or null.</summary>
+        internal static string StateSegment(string state, string key)
+        {
+            return SplitStateSegments(state).TryGetValue(key, out string segment) ? segment : null;
+        }
+
+        /// <summary>
+        /// Where the first top-level segment whose key passes <paramref name="keyMatches"/> starts in
+        /// the state, with its length — or -1 when there is none.
+        /// </summary>
+        /// <remarks>
+        /// A position rather than a split, so a caller can edit the state in place: the state string
+        /// IS the comparison key, and a split-and-rejoin that normalised a single space anywhere else
+        /// would make the record mismatch an unchanged object on the very next check.
+        /// </remarks>
+        internal static int FindStateSegment(string state, Func<string, bool> keyMatches, out int length)
+        {
+            length = 0;
+
+            if (string.IsNullOrEmpty(state))
+                return -1;
+
+            int depth = 0;
+            int start = 0;
+
+            for (int i = 0; i <= state.Length; i++)
+            {
+                if (i < state.Length)
+                {
+                    char c = state[i];
+                    if (c == '(' || c == '[') { depth++; continue; }
+                    if (c == ')' || c == ']') { depth--; continue; }
+                    if (c != ' ' || depth != 0) continue;
+                }
+
+                string segment = state.Substring(start, i - start);
+                int cut = segment.IndexOfAny(new[] { '(', '=' });
+
+                if (cut > 0 && keyMatches(segment.Substring(0, cut)))
+                {
+                    length = i - start;
+                    return start;
+                }
+
+                start = i + 1;
+            }
+
+            return -1;
         }
 
         /// <summary>Stable identity for a settings group, e.g. "project/physics".</summary>

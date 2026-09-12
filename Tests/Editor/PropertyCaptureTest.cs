@@ -1487,6 +1487,261 @@ namespace SceneBaselines
                 lost.findings[0].kind == RegressionKind.Missing &&
                 lost.findings[0].path == "Square");
 
+            failures += CheckAdoptedObjectsKeepTheirPlace();
+            failures += CheckDeletedAndMovedObjectsLeaveTheirPlace();
+
+            return failures;
+        }
+
+        // ── …and does it learn WHERE the object sits? ────────────────────────────
+        //
+        // Asked by the user straight after adoption shipped: roots were MainCamera, Light; they
+        // built Square and accepted it. The record was written, the order was not — and because
+        // MainCamera, Light stay in sequence wherever Square goes, dragging Square to the top was
+        // silent for an object the window had just called covered.
+
+        private static int CheckAdoptedObjectsKeepTheirPlace()
+        {
+            int failures = 0;
+
+            const string idCamera = "GlobalObjectId_V1-2-abc-111-0";
+            const string idLight = "GlobalObjectId_V1-2-abc-222-0";
+            const string idSquare = "GlobalObjectId_V1-2-abc-333-0";
+            const string idWall = "GlobalObjectId_V1-2-abc-444-0";
+
+            BaselineObjectRecord camera = Rec("MainCamera", "components=[Transform,Camera] pos(0,1,-10)", idCamera);
+            BaselineObjectRecord light = Rec("Light", "components=[Transform,Light] pos(0,3,0)", idLight);
+            BaselineObjectRecord square = Rec("Square", "components=[Transform,SpriteRenderer] pos(2,0,0)", idSquare);
+
+            Baseline RootsBaseline()
+            {
+                Baseline b = Baseline(Rec(camera.path, camera.state, camera.id), Rec(light.path, light.state, light.id));
+                b.settings = new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", "roots=(MainCamera,Light)") };
+                return b;
+            }
+
+            BaselineComparison CompareRoots(Baseline b, string roots, params BaselineObjectRecord[] live) =>
+                RegressionCheck.Compare(b, live.ToList(), scenePersistedAfterCapture: true,
+                    liveSettings: new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", roots) });
+
+            // Built at the bottom of the Hierarchy.
+            Baseline atEnd = RootsBaseline();
+            BaselineComparison offered = CompareRoots(atEnd, "roots=(MainCamera,Light,Square)", camera, light, square);
+            BaselineAccept.Result placed = BaselineAccept.Apply(atEnd, offered.newObjects);
+
+            failures += Held("adopting a top-level object records its place in the root order",
+                offered.findings.Count == 0 && placed.orderLeftAloneCount == 0 &&
+                atEnd.settings[0].state == "roots=(MainCamera,Light,Square)");
+            failures += Held("an adopted object in its place reads as unchanged",
+                CompareRoots(atEnd, "roots=(MainCamera,Light,Square)", camera, light, square).findings.Count == 0);
+
+            BaselineComparison dragged = CompareRoots(atEnd, "roots=(Square,MainCamera,Light)", camera, light, square);
+            failures += Held("dragging an adopted object up the Hierarchy is reported",
+                dragged.findings.Count == 1 && dragged.findings[0].kind == RegressionKind.SettingsChanged);
+
+            // Built between two recorded objects: the place, not merely "somewhere in the list".
+            Baseline between = RootsBaseline();
+            BaselineAccept.Apply(between,
+                CompareRoots(between, "roots=(MainCamera,Square,Light)", camera, light, square).newObjects);
+            failures += Held("an object built between two others is recorded between them",
+                between.settings[0].state == "roots=(MainCamera,Square,Light)");
+
+            // 🚨 The tick was about Square. A reorder of MainCamera and Light sitting in the same
+            // live list has not been reviewed, and copying the live order would adopt it silently.
+            Baseline pending = RootsBaseline();
+            BaselineComparison reordered = CompareRoots(pending, "roots=(Light,MainCamera,Square)", camera, light, square);
+            BaselineAccept.Result refused = BaselineAccept.Apply(pending, reordered.newObjects);
+
+            failures += Held("adopting an object does not adopt a reorder nobody reviewed",
+                pending.settings[0].state == "roots=(MainCamera,Light)" &&
+                reordered.findings.Any(f => f.kind == RegressionKind.SettingsChanged));
+            failures += Held("an object that could not be placed is still covered, and says so",
+                refused.acceptedCount == 1 && refused.orderLeftAloneCount == 1 &&
+                pending.objects.Any(o => o.path == "Square"));
+
+            // Two names capture writes identically: "Door A" is recorded, "Door_A" is new. Which
+            // "Door_A" in the list is the new one is a coin toss, so it is not tossed.
+            Baseline doors = Baseline(Rec("Door A", "components=[Transform] pos(0,0,0)", idCamera));
+            doors.settings = new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", "roots=(Door_A)") };
+            BaselineComparison lookalike = RegressionCheck.Compare(doors,
+                new List<BaselineObjectRecord>
+                {
+                    Rec("Door A", "components=[Transform] pos(0,0,0)", idCamera),
+                    Rec("Door_A", "components=[Transform] pos(5,0,0)", idSquare)
+                },
+                scenePersistedAfterCapture: true,
+                liveSettings: new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", "roots=(Door_A,Door_A)") });
+            BaselineAccept.Result guessed = BaselineAccept.Apply(doors, lookalike.newObjects);
+
+            failures += Held("a place that would be a guess is not guessed",
+                guessed.orderLeftAloneCount == 1 && doors.settings[0].state == "roots=(Door_A)");
+
+            // A child: its place lives in the parent's record, which must change there and nowhere else.
+            Baseline level = Baseline(
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Floor,Wall)", idCamera),
+                Rec("Level/Floor", "components=[Transform] pos(0,0,0)", idLight),
+                Rec("Level/Wall", "components=[Transform] pos(0,2,0)", idWall));
+
+            var liveLevel = new List<BaselineObjectRecord>
+            {
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Floor,Square,Wall)", idCamera),
+                Rec("Level/Floor", "components=[Transform] pos(0,0,0)", idLight),
+                Rec("Level/Square", "components=[Transform,SpriteRenderer] pos(2,0,0)", idSquare),
+                Rec("Level/Wall", "components=[Transform] pos(0,2,0)", idWall)
+            };
+
+            BaselineAccept.Apply(level, RegressionCheck.Compare(level, liveLevel, scenePersistedAfterCapture: true).newObjects);
+
+            failures += Held("adopting a child records its place in the parent's child list, and only that",
+                level.objects.Any(o => o.path == "Level" &&
+                                       o.state == "components=[Transform] pos(0,0,0) children=(Floor,Square,Wall)"));
+
+            liveLevel[0] = Rec("Level", "components=[Transform] pos(0,0,0) children=(Square,Floor,Wall)", idCamera);
+            BaselineComparison childDragged = RegressionCheck.Compare(level, liveLevel, scenePersistedAfterCapture: true);
+
+            failures += Held("dragging an adopted child above its siblings is reported",
+                childDragged.findings.Count == 1 && childDragged.findings[0].path == "Level");
+
+            // A parent with ONE recorded child has no list at all (capture writes none below two),
+            // so the first sibling to arrive has to create the list, where capture would put it.
+            Baseline single = Baseline(
+                Rec("Grid", "components=[Transform,Grid] pos(0,0,0) props:Grid(m_CellSize=1)", idCamera),
+                Rec("Grid/Floor", "components=[Transform] pos(0,0,0)", idLight));
+
+            var liveGrid = new List<BaselineObjectRecord>
+            {
+                Rec("Grid", "components=[Transform,Grid] pos(0,0,0) children=(Floor,Square) props:Grid(m_CellSize=1)", idCamera),
+                Rec("Grid/Floor", "components=[Transform] pos(0,0,0)", idLight),
+                Rec("Grid/Square", "components=[Transform,SpriteRenderer] pos(2,0,0)", idSquare)
+            };
+
+            BaselineAccept.Apply(single, RegressionCheck.Compare(single, liveGrid, scenePersistedAfterCapture: true).newObjects);
+
+            failures += Held("a second child creates its parent's list exactly where capture writes it",
+                RegressionCheck.Compare(single, liveGrid, scenePersistedAfterCapture: true).findings.Count == 0);
+
+            return failures;
+        }
+
+        // ── …and the other way round: deleting, renaming, re-parenting ──────────
+        //
+        // The same two-places problem in reverse. Accepting a deletion dropped the record and left
+        // the name in the list, so the list went on reporting the deletion the reviewer had just
+        // accepted — as a second finding, on a different line, that they then had to find and tick.
+        // The measure is simply: accept the one finding a human would tick, and nothing is left over.
+
+        private static int CheckDeletedAndMovedObjectsLeaveTheirPlace()
+        {
+            int failures = 0;
+
+            const string idCamera = "GlobalObjectId_V1-2-abc-111-0";
+            const string idLight = "GlobalObjectId_V1-2-abc-222-0";
+            const string idSquare = "GlobalObjectId_V1-2-abc-333-0";
+            const string idWall = "GlobalObjectId_V1-2-abc-444-0";
+
+            List<BaselineSettingsRecord> Roots(string state) =>
+                new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", state) };
+
+            BaselineComparison Check(Baseline b, string roots, params BaselineObjectRecord[] live) =>
+                RegressionCheck.Compare(b, live.ToList(), scenePersistedAfterCapture: true, liveSettings: Roots(roots));
+
+            List<RegressionFinding> OnlyKind(BaselineComparison c, RegressionKind kind) =>
+                c.findings.Where(f => f.kind == kind).ToList();
+
+            BaselineObjectRecord camera = Rec("MainCamera", "components=[Transform,Camera] pos(0,1,-10)", idCamera);
+            BaselineObjectRecord light = Rec("Light", "components=[Transform,Light] pos(0,3,0)", idLight);
+            BaselineObjectRecord square = Rec("Square", "components=[Transform,SpriteRenderer] pos(2,0,0)", idSquare);
+
+            // Accept rewrites records in place, so a baseline never shares one with a live list.
+            BaselineObjectRecord Copy(BaselineObjectRecord r) => Rec(r.path, r.state, r.id);
+
+            // A top-level object deleted.
+            Baseline deleted = Baseline(Copy(camera), Copy(light), Copy(square));
+            deleted.settings = Roots("roots=(MainCamera,Light,Square)");
+
+            BaselineComparison gone = Check(deleted, "roots=(MainCamera,Light)", camera, light);
+            BaselineAccept.Result removed = BaselineAccept.Apply(deleted, OnlyKind(gone, RegressionKind.Missing));
+
+            failures += Held("accepting a deleted top-level object takes its name out of the root order",
+                removed.orderLeftAloneCount == 0 && deleted.settings[0].state == "roots=(MainCamera,Light)");
+            failures += Held("nothing is left over after accepting a deletion",
+                Check(deleted, "roots=(MainCamera,Light)", camera, light).findings.Count == 0);
+
+            // Same-named twins, both deleted in one accept: the second must still find its entry
+            // after the first has already left the list.
+            Baseline crates = Baseline(
+                Rec("Crate", "components=[Transform] pos(0,0,0)", idCamera),
+                Rec("Crate#2", "components=[Transform] pos(1,0,0)", idLight),
+                Rec("Wall", "components=[Transform] pos(9,0,0)", idWall));
+            crates.settings = Roots("roots=(Crate,Wall,Crate)");
+
+            BaselineAccept.Result bothGone = BaselineAccept.Apply(crates,
+                OnlyKind(Check(crates, "roots=(Wall)", Rec("Wall", "components=[Transform] pos(9,0,0)", idWall)),
+                    RegressionKind.Missing));
+
+            failures += Held("deleting both of two same-named objects removes both entries",
+                bothGone.acceptedCount == 2 && bothGone.orderLeftAloneCount == 0 &&
+                crates.settings[0].state == "roots=(Wall)");
+
+            // A child deleted, down to one — where capture stops writing the list at all.
+            Baseline pair = Baseline(
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Floor,Wall) props:Grid(m_CellSize=1)", idCamera),
+                Rec("Level/Floor", "components=[Transform] pos(0,0,0)", idLight),
+                Rec("Level/Wall", "components=[Transform] pos(0,2,0)", idWall));
+
+            var liveAfterDelete = new List<BaselineObjectRecord>
+            {
+                Rec("Level", "components=[Transform] pos(0,0,0) props:Grid(m_CellSize=1)", idCamera),
+                Rec("Level/Floor", "components=[Transform] pos(0,0,0)", idLight)
+            };
+
+            BaselineComparison childGone = RegressionCheck.Compare(pair, liveAfterDelete, scenePersistedAfterCapture: true);
+            BaselineAccept.Apply(pair, OnlyKind(childGone, RegressionKind.Missing));
+
+            failures += Held("deleting a child is reported once for the child and once for its parent's list",
+                childGone.findings.Count == 2);
+            failures += Held("accepting only the child leaves nothing over, down to the list vanishing",
+                RegressionCheck.Compare(pair, liveAfterDelete, scenePersistedAfterCapture: true).findings.Count == 0);
+
+            // A rename is a move: the old name leaves the list and the new one takes its place.
+            Baseline renamed = Baseline(Copy(camera), Copy(light));
+            renamed.settings = Roots("roots=(MainCamera,Light)");
+
+            BaselineObjectRecord sun = Rec("Sun", light.state, idLight);
+            BaselineComparison renaming = Check(renamed, "roots=(MainCamera,Sun)", camera, sun);
+            BaselineAccept.Apply(renamed, OnlyKind(renaming, RegressionKind.Moved));
+
+            failures += Held("accepting a rename renames the entry in place",
+                renamed.settings[0].state == "roots=(MainCamera,Sun)" &&
+                Check(renamed, "roots=(MainCamera,Sun)", camera, sun).findings.Count == 0);
+
+            // Re-parented: out of the root order, into the parent's list between its two children.
+            Baseline reparented = Baseline(
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Floor,Wall)", idCamera),
+                Rec("Level/Floor", "components=[Transform] pos(0,0,0)", idLight),
+                Rec("Level/Wall", "components=[Transform] pos(0,2,0)", idWall),
+                Rec("Square", square.state, idSquare));
+            reparented.settings = Roots("roots=(Level,Square)");
+
+            BaselineObjectRecord[] liveNested =
+            {
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Floor,Square,Wall)", idCamera),
+                Rec("Level/Floor", "components=[Transform] pos(0,0,0)", idLight),
+                Rec("Level/Square", square.state, idSquare),
+                Rec("Level/Wall", "components=[Transform] pos(0,2,0)", idWall)
+            };
+
+            BaselineAccept.Result moved = BaselineAccept.Apply(reparented,
+                OnlyKind(Check(reparented, "roots=(Level)", liveNested), RegressionKind.Moved));
+
+            failures += Held("accepting a re-parent moves the name from one list to the other",
+                moved.acceptedCount == 1 && moved.orderLeftAloneCount == 0 &&
+                reparented.settings[0].state == "roots=(Level)" &&
+                reparented.objects.Any(o => o.path == "Level" &&
+                                            o.state == "components=[Transform] pos(0,0,0) children=(Floor,Square,Wall)"));
+            failures += Held("nothing is left over after accepting a re-parent",
+                Check(reparented, "roots=(Level)", liveNested).findings.Count == 0);
+
             return failures;
         }
 

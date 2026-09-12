@@ -23,6 +23,28 @@ All notable changes to this package are documented here. The format follows
   Adopting covers rather than silences: delete an adopted object afterwards and it is reported
   MISSING, like anything else the baseline holds. That is the assertion the new test makes.
 
+- **An adopted object keeps its place in the Hierarchy.** Accepting it also writes its name into the
+  recorded order it sits in — the scene's root order for a top-level object, its parent's child list
+  otherwise — at the position it holds now. Before this, adopting `Square` into
+  `MainCamera, Light` wrote Square's record and left the order alone, and because `MainCamera, Light`
+  stay in sequence wherever Square goes, dragging it to the top of the Hierarchy afterwards was never
+  reported.
+
+  Only that one name is inserted; the live order is never copied, because it may also carry a
+  reorder nobody has reviewed. When the object's place cannot be worked out without guessing — such
+  a reorder is still pending, the list was cut short, or two names are written identically — the
+  object is still adopted and the accept message says its position is not covered.
+
+### Fixed
+
+- **Accepting a deletion, rename or re-parent no longer leaves a second finding behind.** Order is
+  recorded as lists of names, so accepting a MISSING object dropped its record but left its name in
+  the root order or its parent's child list — and that list went on reporting the deletion the
+  reviewer had just accepted, as a separate finding they had to find and tick. Accepting a MISSING
+  object now takes its name out of the list; accepting a MOVED one (a rename is a move) takes the old
+  name out and puts the new one in where the object sits now. A parent's list is removed or created
+  exactly where capture would write it when its child count crosses two.
+
 - **The window's headline counts additions.** `nothing differs · 1 added` rather than
   `nothing differs`. The count line is the one thing a reviewer reads without scrolling, and a scene
   with a brand-new object in it that the tool calls "nothing differs" reads as a tool that missed it.
