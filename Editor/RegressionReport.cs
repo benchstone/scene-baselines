@@ -423,9 +423,23 @@ namespace SceneBaselines
             report.scenesChecked = report.scenes.Count;
             report.baselinesCompared = report.scenes.Sum(s => s.baselinesCompared);
             report.baselinesSkipped = report.scenes.Sum(s => s.baselinesSkipped);
+            ApplyWorstVerdict(report);
+            return report;
+        }
+
+        /// <summary>
+        /// Sets the run's finding total, verdict and exit code from its scenes. Worst verdict wins:
+        /// a project is not passing because most of its scenes are.
+        /// </summary>
+        /// <remarks>
+        /// Exposed to the replay, which removes findings after a report is built and must then
+        /// arrive at the run's verdict the same way this does — never by assuming that a report
+        /// with no findings left is a pass, since a scene that compared nothing has none either.
+        /// </remarks>
+        internal static void ApplyWorstVerdict(Report report)
+        {
             report.totalFindings = report.scenes.Sum(s => s.findingCount);
 
-            // Worst verdict wins. A project is not passing because most of its scenes are.
             RegressionVerdict worst = RegressionVerdict.Pass;
             foreach (ReportScene scene in report.scenes)
             {
@@ -436,7 +450,6 @@ namespace SceneBaselines
 
             report.verdict = RegressionCheck.VerdictToken(worst);
             report.exitCode = ExitCodeFor(worst);
-            return report;
         }
 
         private static int Severity(RegressionVerdict verdict)
@@ -531,8 +544,7 @@ namespace SceneBaselines
 
             if (!string.IsNullOrEmpty(scene.notCheckedReason))
             {
-                sb.AppendLine("A baseline is recorded automatically the next time a request verifies " +
-                    "fully clean.");
+                sb.AppendLine(WhatToDoWhenNotChecked(scene.notCheckedReason));
                 sb.AppendLine();
             }
 
@@ -541,6 +553,36 @@ namespace SceneBaselines
             // failure and no way to tell what to do about it.
             foreach (ReportBaseline baseline in scene.baselines)
                 RenderBaseline(sb, baseline);
+        }
+
+        /// <summary>The one thing to do next about a scene that compared nothing, given why.</summary>
+        /// <remarks>
+        /// 🚨 This used to say "a baseline is recorded automatically the next time a request verifies
+        /// fully clean" whatever the reason — a sentence about the AI agent this package was split
+        /// out of. Nothing in this package records on its own, so a reader following that advice
+        /// would wait for a baseline that never comes, and a renamed scene was told the same thing
+        /// as a brand-new one.
+        /// </remarks>
+        public static string WhatToDoWhenNotChecked(string notCheckedReason)
+        {
+            string reason = notCheckedReason ?? "";
+
+            if (reason.StartsWith("the scene has never been saved", StringComparison.Ordinal))
+                return "Save the scene, then record a baseline with Scene Baselines ▸ Record Baseline for Open Scene.";
+
+            if (reason.StartsWith("the scene file no longer exists", StringComparison.Ordinal))
+                return "If the scene was renamed or moved, its baselines still name the old path: record a new " +
+                       "baseline at the new path and delete the old ones. If it was deleted on purpose, delete " +
+                       "its baselines.";
+
+            if (reason.StartsWith("the scene could not be opened", StringComparison.Ordinal))
+                return "Fix whatever stops the scene opening; nothing about it can be checked until it does.";
+
+            if (reason.StartsWith("every baseline for this scene was unreadable", StringComparison.Ordinal))
+                return "Record a fresh baseline with Scene Baselines ▸ Record Baseline for Open Scene — the " +
+                       "existing ones were written in a format this version cannot compare.";
+
+            return "Record one with Scene Baselines ▸ Record Baseline for Open Scene, and commit it.";
         }
 
         private static void RenderBaseline(StringBuilder sb, ReportBaseline baseline)
@@ -568,7 +610,7 @@ namespace SceneBaselines
             if (!string.IsNullOrEmpty(baseline.incomparableReason))
             {
                 sb.AppendLine($"> **Not compared:** {baseline.incomparableReason}. Nothing here was " +
-                    "verified. Re-record this baseline from a fresh clean pass.");
+                    "verified. Record a fresh baseline for this scene with Scene Baselines ▸ Record Baseline for Open Scene.");
                 sb.AppendLine();
                 return;
             }

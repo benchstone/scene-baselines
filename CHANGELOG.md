@@ -4,6 +4,48 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] — 2026-09-13
+
+### Fixed
+
+- **Accepting a finding no longer accepts changes in older baselines that were never shown.**
+  Ticking a finding also ticks the same finding in older baselines, and "the same" meant the same
+  kind of problem on the same object. An older baseline's finding on that object could hold more —
+  `Player moved` on screen, `m_Mass 1 → 40` as well underneath, shown only as "also differs from 1
+  older baseline" — and accepting wrote both. That is exactly the case older baselines are kept for.
+  Findings are now twins only when they change the same things to the same values; one that holds
+  anything more is listed on its own under the older baselines, where it can be read first.
+- **History replay no longer reports a scene it could not compare as passing.** Setting aside
+  project-settings findings rewrote every scene without findings as a pass — including scenes that
+  compared nothing, like the one a commit adds or one whose capture failed at the parent — and each
+  commit's section said "no findings" from the count alone. Those scenes now stay NOT CHECKED, are
+  listed by name in the commit's section with the reason, and are counted in the run's summary. A
+  commit that deletes a scene is reported too, rather than the scene quietly not being asked about.
+- **History replay no longer skips commits that touched files with non-ASCII names.** git's output
+  was decoded with the console's encoding (IBM437 in the Windows editor), so a path like
+  `Assets/კარი.prefab` never matched what the scenes depend on and every commit touching it was
+  skipped as unrelated. git's output is now read as UTF-8, and the suite checks it against a real
+  repository.
+- **The report no longer groups unrelated component changes as "all changed props".** Grouping read
+  a change's name up to its first colon, and every component property is written
+  `props:Component.field` — so a trigger toggled on one object, a mass changed on another and a light
+  dimmed on a third became one group, and only the first of them was printed. Names are now read up
+  to the colon-space that separates them from their values.
+- **An accept from a saved scene no longer asks for another save.** 0.8.1 could not tell a file that
+  never had an unsaved accept from an older file that never wrote them down, so it treated every file
+  captured from an unsaved scene the cautious way — and every ordinary accept left its baseline
+  "unconfirmed" until the scene was saved again. Baselines now record that they track unsaved accepts
+  (`tracksUnsavedAccepts`); older files keep the caution until their next accept, which carries it
+  over.
+- **The report's advice for a scene it could not check is about this package.** It said a baseline
+  "is recorded automatically the next time a request verifies fully clean", which describes the AI
+  agent this package was split from; nothing here records on its own. It now says what to do for the
+  actual reason — record one, save the scene first, or re-record a scene that was renamed or moved.
+- **An object named like a twin's suffix no longer shares its path with a twin.** Siblings `Crate`,
+  `Crate` and one really named `Crate#2` gave the second twin `Crate#2` too, so two records held one
+  path. Suffixes now skip any name an object actually has. Scenes without such a name get exactly
+  the paths they had before.
+
 ## [0.8.1] — 2026-09-13
 
 ### Fixed

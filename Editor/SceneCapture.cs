@@ -136,9 +136,31 @@ namespace SceneBaselines
         /// </remarks>
         private static List<string> DisambiguatedPaths(List<GameObject> objects)
         {
+            List<string> paths = AssignPaths(objects, null, out HashSet<string> named);
+
+            // 🚨 A suffix could land on a path an object is really NAMED. Siblings "Enemy", "Enemy"
+            // and one actually called "Enemy#2" gave the second twin "Enemy#2" — then the real
+            // "Enemy#2" arrived at a path already taken, and two records held the same path. So when
+            // any object's own name looks like a suffix, the paths are assigned again with every
+            // such name reserved. A scene without one — nearly all of them — is assigned exactly as
+            // before, so no existing baseline sees a single path change.
+            if (!named.Any(LooksSuffixed))
+                return paths;
+
+            return AssignPaths(objects, named, out _);
+        }
+
+        /// <summary>
+        /// Paths for the swept list, "#n"-suffixed where they collide, never onto a reserved path.
+        /// <paramref name="named"/> returns the path each object asked for before any suffix.
+        /// </summary>
+        private static List<string> AssignPaths(List<GameObject> objects, HashSet<string> reserved,
+            out HashSet<string> named)
+        {
             var assigned = new Dictionary<Transform, string>();
             var seen = new Dictionary<string, int>();
             var paths = new List<string>(objects.Count);
+            named = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (GameObject go in objects)
             {
@@ -147,6 +169,10 @@ namespace SceneBaselines
                     ? parentPath + "/" + go.name
                     : GetHierarchyPath(go.transform);
 
+                // Collected BEFORE any suffix: the object "Enemy#2" arriving after its lookalike twins
+                // has already had its own name taken, so only the name it asked for can reveal it.
+                named.Add(path);
+
                 // Same-named siblings still collide, so one of them takes a "#n" suffix. It is
                 // assigned walking the list in the order the sweep fixed -- by hierarchy path, then
                 // by sibling index -- so the same twin keeps the same suffix across captures. It used
@@ -154,8 +180,15 @@ namespace SceneBaselines
                 // two captures of an unchanged scene.
                 if (seen.TryGetValue(path, out int count))
                 {
-                    seen[path] = count + 1;
-                    path += "#" + (count + 1);
+                    int n = count + 1;
+
+                    // Past any suffix an object is really named, and past any path already handed out.
+                    while ((reserved != null && reserved.Contains(path + "#" + n)) || seen.ContainsKey(path + "#" + n))
+                        n++;
+
+                    seen[path] = n;
+                    path += "#" + n;
+                    seen[path] = 1;
                 }
                 else
                 {
@@ -167,6 +200,22 @@ namespace SceneBaselines
             }
 
             return paths;
+        }
+
+        /// <summary>Whether a path ends the way a twin's suffix does: "#" and digits.</summary>
+        private static bool LooksSuffixed(string path)
+        {
+            int hash = path.LastIndexOf('#');
+            if (hash <= 0 || hash == path.Length - 1 || path.IndexOf('/', hash) >= 0)
+                return false;
+
+            for (int i = hash + 1; i < path.Length; i++)
+            {
+                if (!char.IsDigit(path[i]))
+                    return false;
+            }
+
+            return true;
         }
 
         /// <summary>An object's place in the hierarchy, as a chain of sibling indices that sorts.</summary>

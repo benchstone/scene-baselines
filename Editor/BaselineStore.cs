@@ -136,6 +136,18 @@ namespace SceneBaselines
         /// </remarks>
         public string lastUnsavedAcceptUtc;
 
+        /// <summary>
+        /// Whether <see cref="lastUnsavedAcceptUtc"/> has been kept for every accept into this file.
+        /// False for files last accepted into before it was.
+        /// </summary>
+        /// <remarks>
+        /// An empty <see cref="lastUnsavedAcceptUtc"/> means two different things without this: "no
+        /// accept was ever made with unsaved changes" in a file that records them, and "nobody wrote
+        /// it down" in an older one. Read the cautious way everywhere, every ordinary accept made
+        /// from a saved scene also demanded one more save before its baseline counted as confirmed.
+        /// </remarks>
+        public bool tracksUnsavedAccepts;
+
         /// <summary>True when part of this baseline was agreed to after the fact rather than recorded.</summary>
         public bool HasAcceptedFindings => acceptedFindingCount > 0;
 
@@ -222,10 +234,11 @@ namespace SceneBaselines
         /// capture time cannot be read.
         /// </summary>
         /// <remarks>
-        /// A file written before <see cref="lastUnsavedAcceptUtc"/> existed cannot say which of its
-        /// accepts was the unsaved one. When it is marked unsaved and has accepts at all, the latest
-        /// accept is used: that can ask for one save too many, never one too few, which is the
-        /// direction this rule is allowed to be wrong in.
+        /// A file written before accepts were tracked (<see cref="tracksUnsavedAccepts"/> false)
+        /// cannot say which of its accepts was the unsaved one. When it is marked unsaved and has
+        /// accepts at all, the latest accept is used: that can ask for one save too many, never one
+        /// too few, which is the direction this rule is allowed to be wrong in. A file that DOES track
+        /// them is taken at its word, so an accept from a saved scene asks for nothing more.
         /// </remarks>
         public bool TryGetStateWrittenUtc(out DateTime writtenUtc)
         {
@@ -234,7 +247,9 @@ namespace SceneBaselines
 
             string unsavedAccept = !string.IsNullOrWhiteSpace(lastUnsavedAcceptUtc)
                 ? lastUnsavedAcceptUtc
-                : capturedFromUnsavedScene && acceptedFindingCount > 0 ? lastAcceptedUtc : null;
+                : !tracksUnsavedAccepts && capturedFromUnsavedScene && acceptedFindingCount > 0
+                    ? lastAcceptedUtc
+                    : null;
 
             if (TryParseUtc(unsavedAccept, out DateTime accepted) && accepted > writtenUtc)
                 writtenUtc = accepted;

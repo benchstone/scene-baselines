@@ -1513,9 +1513,10 @@ namespace SceneBaselines
             if (VerdictFor(result) == RegressionVerdict.NotChecked)
             {
                 sb.AppendLine(DescribeVerdict(result));
-                sb.AppendLine(result.sceneWasUnsaved
-                    ? "Save the scene to start building regression history."
-                    : "A baseline is recorded automatically the next time a request verifies fully clean.");
+                sb.AppendLine(RegressionReport.WhatToDoWhenNotChecked(
+                    result.sceneWasUnsaved ? "the scene has never been saved"
+                    : result.comparisons.Count > 0 ? "every baseline for this scene was unreadable"
+                    : "no baselines recorded for this scene"));
                 return sb.ToString().TrimEnd();
             }
 

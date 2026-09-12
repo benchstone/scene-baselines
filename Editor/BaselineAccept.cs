@@ -261,6 +261,20 @@ namespace SceneBaselines
                 return result;
             }
 
+            // A file accepted into before unsaved accepts were tracked keeps the caution it had: its
+            // latest earlier accept may have been the unsaved one, so that time is written down as
+            // one before the file starts being taken at its word.
+            if (!baseline.tracksUnsavedAccepts)
+            {
+                if (baseline.capturedFromUnsavedScene && baseline.acceptedFindingCount > 0 &&
+                    string.IsNullOrWhiteSpace(baseline.lastUnsavedAcceptUtc))
+                {
+                    baseline.lastUnsavedAcceptUtc = baseline.lastAcceptedUtc;
+                }
+
+                baseline.tracksUnsavedAccepts = true;
+            }
+
             baseline.acceptedFindingCount += result.acceptedCount;
             baseline.lastAcceptedUtc = BaselineStore.CreateTimestampUtc();
 

@@ -374,17 +374,23 @@ namespace SceneBaselines
         /// The property name out of a "name: was → now" line.
         /// </summary>
         /// <remarks>
-        /// Split at the FIRST colon only. Values carry colons of their own — an action reference
-        /// reads "(ImpBaseAttack:MeleeAction)" — and splitting at the last one would key the cluster
-        /// on the value, which is the one thing every member of it differs in.
+        /// Split at the first COLON-SPACE, which is what every difference line puts between the name
+        /// and the values ("name: was → now") and which a name never contains.
+        ///
+        /// 🚨 Not at the first colon. Values carry colons of their own — an action reference reads
+        /// "(ImpBaseAttack:MeleeAction)" — but so do NAMES: every component property is written
+        /// "props:BoxCollider.m_IsTrigger". Splitting at the first colon keyed all of them on
+        /// "props", so a trigger toggled on one object, a mass changed on another and a light dimmed
+        /// on a third became one group "all changed props" — and the report printed only the first
+        /// member's change, hiding the rest behind a cause nobody measured.
         /// </remarks>
         public static string KeyOf(string change)
         {
             if (string.IsNullOrEmpty(change))
                 return "";
 
-            int colon = change.IndexOf(':');
-            return (colon < 0 ? change : change.Substring(0, colon)).Trim();
+            int separator = change.IndexOf(": ", StringComparison.Ordinal);
+            return (separator < 0 ? change : change.Substring(0, separator)).Trim();
         }
     }
 

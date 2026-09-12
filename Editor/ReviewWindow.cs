@@ -543,14 +543,64 @@ namespace SceneBaselines
             return older.Count(c => c.findings.Any(f => string.Equals(Key(f), key, StringComparison.Ordinal)));
         }
 
+        private static string Key(RegressionFinding finding) => DecisionKey(finding);
+
         /// <summary>
-        /// What makes two findings "the same finding" across baselines: the kind of problem and the
-        /// object it is about. Deliberately NOT the recorded state — two baselines can disagree
-        /// about what an object used to be while agreeing completely about what is wrong with it now.
+        /// What makes two findings "the same finding" across baselines — the same decision for a
+        /// reviewer: the kind of problem, the object, and what it changed TO.
         /// </summary>
-        private static string Key(RegressionFinding finding)
+        /// <remarks>
+        /// Deliberately NOT what an object used to be: two baselines can disagree about the old
+        /// value while agreeing completely about what is different now, and accepting either writes
+        /// the same thing.
+        ///
+        /// 🚨 But it must include what differs. This was kind and path alone, so ticking "Player
+        /// moved" in the newest baseline also ticked an older baseline's finding on Player — which
+        /// ALSO held "m_Mass 1 → 40", a change the window never showed (twins only add to a count).
+        /// Accepting wrote both. That is the case older baselines are kept for: a regression the
+        /// newest one was recorded over, and it was being accepted without ever being on screen.
+        /// Now a finding that differs in anything more is not a twin; it is listed on its own under
+        /// the older baselines, where it can be read before it is ticked.
+        ///
+        /// MISSING and ADDED stay keyed by object alone. Accepting a deletion removes a record and
+        /// adopting an addition writes the live state, the same in every baseline, so no baseline can
+        /// be carrying something else inside either decision.
+        /// </remarks>
+        public static string DecisionKey(RegressionFinding finding)
         {
-            return finding.kind + "|" + (finding.path ?? "");
+            string key = finding.kind + "|" + (finding.path ?? "");
+
+            if (finding.kind == RegressionKind.Missing || finding.kind == RegressionKind.Added)
+                return key;
+
+            List<string> changes = finding.changedSegments ?? new List<string>();
+
+            // Nothing named: fall back to the whole states, so an unnamed difference can never ride
+            // along with a named one.
+            if (changes.Count == 0)
+                return key + "|" + (finding.baselineState ?? "") + "|" + (finding.liveState ?? "");
+
+            IEnumerable<string> outcomes = changes
+                .Select(line =>
+                {
+                    // An order line — "roots: Camera moved 4 → 5 of 5" — names WHICH object moved
+                    // before the arrow, so it is kept whole rather than cut down to "roots → 5 of 5".
+                    if (line.StartsWith("roots:", StringComparison.Ordinal) ||
+                        line.StartsWith("children:", StringComparison.Ordinal))
+                        return line;
+
+                    int arrow = line.LastIndexOf(" → ", StringComparison.Ordinal);
+                    int colon = line.IndexOf(": ", StringComparison.Ordinal);
+
+                    // "<what>: <was> → <now>" becomes "<what> → <now>"; any other shape is kept whole.
+                    return arrow > 0 && colon > 0 && colon < arrow
+                        ? line.Substring(0, colon) + " → " + line.Substring(arrow + 3)
+                        : line;
+                })
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(outcome => outcome, StringComparer.Ordinal);
+
+            return key + "|" + string.Join("\n", outcomes);
         }
 
         private void DrawFinding(RegressionFinding finding, int echoCount)

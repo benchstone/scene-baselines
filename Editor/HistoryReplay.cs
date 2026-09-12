@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -128,6 +129,9 @@ namespace SceneBaselines
 
             public bool done;
             public int findings;
+
+            /// <summary>Scene checks across the run that compared nothing. Never folded into a pass.</summary>
+            public int scenesNotChecked;
             public int commitsReported;
             public string reportPath;
             public string startedUtc;
@@ -456,7 +460,9 @@ namespace SceneBaselines
             FinishReport(plan, reason);
 
             Debug.Log($"{LogPrefix} Replay {reason}: {plan.commitsReported} commit(s) reported, " +
-                      $"{plan.findings} finding(s) in total. Report: {plan.reportPath}");
+                      $"{plan.findings} finding(s) in total" +
+                      (plan.scenesNotChecked > 0 ? $", {plan.scenesNotChecked} scene check(s) NOT CHECKED" : "") +
+                      $". Report: {plan.reportPath}");
         }
 
         /// <summary>
@@ -505,35 +511,75 @@ namespace SceneBaselines
 
         private static void CheckAt(Plan plan, string child, string parent)
         {
-            var present = new List<string>();
+            // Every scene that exists now, AND every scene that was recorded at the parent but is gone
+            // now. Checking only the scenes present here made a commit that DELETED a scene report
+            // "no findings" for it — the scene was simply never asked about.
+            var toCheck = new List<string>();
             foreach (string scene in plan.scenes)
             {
-                if (File.Exists(ToAbsolute(scene)))
-                    present.Add(scene);
+                if (File.Exists(ToAbsolute(scene)) || BaselineStore.LoadForScene(scene).Count > 0)
+                    toCheck.Add(scene);
             }
 
-            RegressionReport.Report report = RegressionReport.BuildForScenes(present);
-            int setAside = SetAsideProjectSettings(report);
-
-            plan.findings += report.totalFindings;
-            plan.commitsReported++;
-
             string subject = plan.subjects.Count > plan.index ? plan.subjects[plan.index] : "";
-
-            // Streamed, not saved for the end: the number that decides whether this is usable is
-            // time to the FIRST finding, and a reader watching a console learns nothing from a run
-            // that stays silent until it is done.
-            Debug.Log($"{LogPrefix} Replay {plan.commitsReported}/{plan.commits.Count}: " +
-                      $"{Short(child)} {subject} — {report.totalFindings} finding(s).");
 
             var section = new StringBuilder();
             section.AppendLine();
             section.AppendLine($"## `{Short(child)}` {subject}");
             section.AppendLine();
-            section.AppendLine($"Compared against its parent `{Short(parent)}` — " +
-                               (report.totalFindings == 0 ? "no findings" : $"**{report.totalFindings} finding(s)**") +
-                               ".");
+
+            plan.commitsReported++;
+
+            if (toCheck.Count == 0)
+            {
+                plan.scenesNotChecked += plan.scenes.Count;
+
+                Debug.Log($"{LogPrefix} Replay {plan.commitsReported}/{plan.commits.Count}: " +
+                          $"{Short(child)} {subject} — NOT CHECKED, none of the scene(s) exist here.");
+
+                section.AppendLine($"**Not checked** against its parent `{Short(parent)}` — none of the " +
+                                   "replayed scenes exist at this commit or its parent, so nothing was compared.");
+                AppendReport(plan, section.ToString());
+                return;
+            }
+
+            RegressionReport.Report report = RegressionReport.BuildForScenes(toCheck);
+            int setAside = SetAsideProjectSettings(report);
+
+            // A scene that compared nothing has no findings either, so "no findings" alone would read
+            // as a pass for it. Named separately, every time.
+            List<RegressionReport.ReportScene> notChecked = report.scenes
+                .Where(s => s.verdict == RegressionCheck.VerdictToken(RegressionVerdict.NotChecked))
+                .ToList();
+
+            plan.findings += report.totalFindings;
+            plan.scenesNotChecked += notChecked.Count;
+
+            // Streamed, not saved for the end: the number that decides whether this is usable is
+            // time to the FIRST finding, and a reader watching a console learns nothing from a run
+            // that stays silent until it is done.
+            Debug.Log($"{LogPrefix} Replay {plan.commitsReported}/{plan.commits.Count}: " +
+                      $"{Short(child)} {subject} — {report.totalFindings} finding(s)" +
+                      (notChecked.Count > 0 ? $", {notChecked.Count} scene(s) NOT CHECKED." : "."));
+
+            string outcome = report.totalFindings > 0
+                ? $"**{report.totalFindings} finding(s)**"
+                : notChecked.Count > 0 ? "no findings in what could be compared" : "no findings";
+
+            section.AppendLine($"Compared against its parent `{Short(parent)}` — {outcome}.");
             section.AppendLine();
+
+            if (notChecked.Count > 0)
+            {
+                section.AppendLine($"**{notChecked.Count} scene(s) not checked here** — nothing about them is " +
+                                   "verified at this commit:");
+                section.AppendLine();
+
+                foreach (RegressionReport.ReportScene scene in notChecked)
+                    section.AppendLine($"- `{scene.scenePath}` — {DescribeNotChecked(scene)}");
+
+                section.AppendLine();
+            }
 
             string scope = ScopeLine(plan, report);
             if (scope != null)
@@ -561,6 +607,23 @@ namespace SceneBaselines
             }
 
             AppendReport(plan, section.ToString());
+        }
+
+        /// <summary>Why a scene compared nothing, in terms of the two commits being compared.</summary>
+        private static string DescribeNotChecked(RegressionReport.ReportScene scene)
+        {
+            switch (scene.notCheckedReason)
+            {
+                case "no baselines recorded for this scene":
+                    return "nothing was recorded for it at the parent: the scene is new in this commit, " +
+                           "or its capture failed there (see the console)";
+
+                case "the scene file no longer exists at this path":
+                    return "the scene was deleted or moved in this commit";
+
+                default:
+                    return string.IsNullOrEmpty(scene.notCheckedReason) ? scene.headline : scene.notCheckedReason;
+            }
         }
 
         /// <summary>
@@ -676,6 +739,8 @@ namespace SceneBaselines
 
             foreach (RegressionReport.ReportScene scene in report.scenes)
             {
+                int removedHere = 0;
+
                 foreach (RegressionReport.ReportBaseline baseline in scene.baselines)
                 {
                     int before = baseline.findings.Count;
@@ -689,9 +754,8 @@ namespace SceneBaselines
                     if (dropped == 0)
                         continue;
 
-                    removed += dropped;
+                    removedHere += dropped;
                     scene.findingCount -= dropped;
-                    report.totalFindings -= dropped;
 
                     // A baseline left holding nothing is a pass, and must read as one: leaving the
                     // verdict at "regressions" over an empty list would be the report contradicting
@@ -700,35 +764,63 @@ namespace SceneBaselines
                         baseline.verdict = "pass";
                 }
 
-                // Reworded in the shape the ordinary renderer uses, so a replayed scene and a
-                // checked one do not describe the same situation two different ways.
-                if (scene.findingCount <= 0)
-                {
-                    scene.findingCount = 0;
-                    scene.verdict = "pass";
-                    scene.headline = $"PASS — {scene.baselinesCompared} baseline(s) still hold.";
-                }
-                else if (scene.verdict == "regressions")
-                {
-                    int failing = 0;
-                    foreach (RegressionReport.ReportBaseline baseline in scene.baselines)
-                    {
-                        if (baseline.findings.Count > 0)
-                            failing++;
-                    }
+                // 🚨 Only a scene this filter actually touched is re-judged. This used to rewrite
+                // every scene with no findings as a PASS — including scenes that were never compared,
+                // which have no findings precisely BECAUSE nothing was compared: the commit that adds
+                // a scene, a parent whose capture failed. "Not checked" read as "passed", which is
+                // the one answer this tool may never give.
+                if (removedHere == 0)
+                    continue;
 
-                    scene.headline = $"REGRESSIONS FOUND — {scene.findingCount} across {failing} of " +
-                                     $"{scene.baselinesCompared} baseline(s).";
-                }
+                removed += removedHere;
+                RejudgeScene(scene);
             }
 
-            if (report.totalFindings <= 0)
-            {
-                report.totalFindings = 0;
-                report.verdict = "pass";
-            }
+            // The run's verdict is the worst of its scenes, as it was when the report was built —
+            // never "pass" merely because no findings are left, which a not-checked scene also has.
+            RegressionReport.ApplyWorstVerdict(report);
 
             return removed;
+        }
+
+        /// <summary>
+        /// A scene's verdict and headline, worked out again from its baselines after findings were
+        /// set aside. Reworded in the shape the ordinary renderer uses, so a replayed scene and a
+        /// checked one do not describe the same situation two different ways.
+        /// </summary>
+        private static void RejudgeScene(RegressionReport.ReportScene scene)
+        {
+            scene.findingCount = Math.Max(0, scene.findingCount);
+
+            var compared = scene.baselines.Where(b => b.verdict != "not-checked").ToList();
+            int failing = compared.Count(b => b.findings.Count > 0);
+
+            if (compared.Count == 0)
+            {
+                // Findings were removed, so something was compared; kept for safety all the same.
+                scene.verdict = "not-checked";
+                return;
+            }
+
+            if (scene.findingCount == 0)
+            {
+                scene.verdict = "pass";
+                scene.headline = $"PASS — {scene.baselinesCompared} baseline(s) still hold.";
+            }
+            else if (compared.Any(b => b.findings.Count > 0 && b.verdict == "regressions"))
+            {
+                scene.verdict = "regressions";
+                scene.headline = $"REGRESSIONS FOUND — {scene.findingCount} across {failing} of " +
+                                 $"{scene.baselinesCompared} baseline(s).";
+            }
+            else
+            {
+                scene.verdict = "unconfirmed";
+                scene.headline = $"UNCONFIRMED — {scene.findingCount} difference(s) across {failing} of " +
+                                 $"{scene.baselinesCompared} baseline(s), but no affected baseline can prove " +
+                                 "its recorded state ever reached disk, so these may be unsaved work reverting " +
+                                 "rather than regressions.";
+            }
         }
 
         // ── Choosing the commits ─────────────────────────────────────────────────
@@ -1098,12 +1190,28 @@ namespace SceneBaselines
         /// <summary>Runs git in the project's repository; returns stdout, or null on failure.</summary>
         private static string Git(string arguments, out string error)
         {
+            return Git(ProjectRoot(), arguments, out error);
+        }
+
+        /// <summary>Runs git in the given directory; returns stdout, or null on failure.</summary>
+        /// <remarks>
+        /// 🚨 Read as UTF-8, explicitly. git writes paths as UTF-8 (core.quotepath=false says not to
+        /// escape them), but a redirected stream is decoded with the CONSOLE's encoding unless told
+        /// otherwise — IBM437 in the Windows editor. "Assets/კარი.prefab" then came back as 26
+        /// characters of mojibake, matched nothing in the dependency list, and every commit that
+        /// touched it was skipped as unrelated to the scenes. Skipping a real finding silently is the
+        /// one thing the commit filter promises never to do.
+        /// </remarks>
+        private static string Git(string workingDirectory, string arguments, out string error)
+        {
             var info = new ProcessStartInfo("git", arguments)
             {
-                WorkingDirectory = ProjectRoot(),
+                WorkingDirectory = workingDirectory,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
                 CreateNoWindow = true
             };
 
@@ -1292,7 +1400,11 @@ namespace SceneBaselines
             tail.AppendLine("---");
             tail.AppendLine();
             tail.AppendLine($"Replay {reason}: {plan.commitsReported} of {plan.commits.Count} commit(s) " +
-                            $"reported, {plan.findings} finding(s) in total.");
+                            $"reported, {plan.findings} finding(s) in total" +
+                            (plan.scenesNotChecked > 0
+                                ? $", and {plan.scenesNotChecked} scene check(s) that compared nothing — " +
+                                  "see the sections marked \"not checked\"."
+                                : "."));
 
             AppendHowToRead(plan, tail);
 

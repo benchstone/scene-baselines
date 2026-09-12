@@ -1253,6 +1253,55 @@ namespace SceneBaselines
 
             failures += CheckAnUnsavedAcceptNeedsALaterSave();
             failures += CheckTheAcceptDialogSaysWhatHappened();
+            failures += CheckOnlyTheSameDecisionIsTickedTwice();
+
+            return failures;
+        }
+
+        // ── When is an older baseline's finding the "same" one? ──────────────────
+        //
+        // 🚨 Ticking a finding ticks its twins in older baselines. Twins were matched by kind and
+        // object alone, so an older baseline's finding on the same object that ALSO held a change
+        // the window never showed — "m_Mass 1 → 40", listed only as "also differs from 1 older
+        // baseline" — was accepted along with the one on screen.
+
+        private static int CheckOnlyTheSameDecisionIsTickedTwice()
+        {
+            int failures = 0;
+
+            const string id = "GlobalObjectId_V1-2-abc-111-0";
+            const string live = "components=[Transform,Rigidbody] pos(1,0,0) props:Rigidbody(m_Mass=40)";
+
+            RegressionFinding Against(string recorded) =>
+                CompareObjects(new List<BaselineObjectRecord> { Rec("Player", recorded, id) },
+                    new List<BaselineObjectRecord> { Rec("Player", live, id) }).findings.Single();
+
+            RegressionFinding newest = Against("components=[Transform,Rigidbody] pos(0,0,0) props:Rigidbody(m_Mass=40)");
+            RegressionFinding olderWithMore = Against("components=[Transform,Rigidbody] pos(0,0,0) props:Rigidbody(m_Mass=1)");
+            RegressionFinding olderFromElsewhere = Against("components=[Transform,Rigidbody] pos(5,0,0) props:Rigidbody(m_Mass=40)");
+
+            failures += Held("an older finding holding a change the newest does not show is not a twin",
+                ReviewWindow.DecisionKey(newest) != ReviewWindow.DecisionKey(olderWithMore));
+
+            failures += Held("the same change reached from a different old value is still a twin",
+                ReviewWindow.DecisionKey(newest) == ReviewWindow.DecisionKey(olderFromElsewhere));
+
+            RegressionFinding Order(string recorded, string now) =>
+                CompareStates(recorded, now).findings.Single();
+
+            failures += Held("two different objects moving in a list are not twins",
+                ReviewWindow.DecisionKey(Order("roots=(A,B,C)", "roots=(B,C,A)")) !=
+                ReviewWindow.DecisionKey(Order("roots=(A,B,C)", "roots=(C,A,B)")));
+
+            var gone = new RegressionFinding { path = "Player", kind = RegressionKind.Missing, baselineState = "speed=5" };
+            var goneOlder = new RegressionFinding { path = "Player", kind = RegressionKind.Missing, baselineState = "speed=1" };
+            failures += Held("a deletion is the same decision in every baseline",
+                ReviewWindow.DecisionKey(gone) == ReviewWindow.DecisionKey(goneOlder));
+
+            var unnamed = new RegressionFinding { path = "Player", kind = RegressionKind.Changed, baselineState = "a", liveState = "c" };
+            var unnamedOlder = new RegressionFinding { path = "Player", kind = RegressionKind.Changed, baselineState = "b", liveState = "c" };
+            failures += Held("a difference nothing could name is never folded into another",
+                ReviewWindow.DecisionKey(unnamed) != ReviewWindow.DecisionKey(unnamedOlder));
 
             return failures;
         }
@@ -1322,6 +1371,26 @@ namespace SceneBaselines
             older.lastAcceptedUtc = "2026-03-01T10:00:00.0000000Z";
             failures += Held("an older file marked unsaved waits for a save after its last accept",
                 Written(older) == Utc(older.lastAcceptedUtc));
+
+            // 🚨 The caution above is for files that cannot say. A file that records its unsaved
+            // accepts is taken at its word — without that, capturing from a dirty scene (the normal
+            // case) and later accepting from a SAVED one demanded yet another save before the
+            // baseline counted as confirmed, after every ordinary accept.
+            Baseline capturedDirty = Fresh();
+            capturedDirty.capturedFromUnsavedScene = true;
+            BaselineAccept.Apply(capturedDirty, AChange(), sceneHadUnsavedChanges: false);
+            BaselineAccept.Apply(capturedDirty, AChange(), sceneHadUnsavedChanges: false);
+            failures += Held("accepts from a saved scene ask for no save beyond the capture's",
+                capturedDirty.tracksUnsavedAccepts && Written(capturedDirty) == Utc(created));
+
+            // An older file accepted into again keeps the caution it had, then starts being precise.
+            Baseline olderAgain = Fresh();
+            olderAgain.capturedFromUnsavedScene = true;
+            olderAgain.acceptedFindingCount = 2;
+            olderAgain.lastAcceptedUtc = "2026-03-01T10:00:00.0000000Z";
+            BaselineAccept.Apply(olderAgain, AChange(), sceneHadUnsavedChanges: false);
+            failures += Held("an older file keeps waiting on its last untracked accept after a saved accept",
+                olderAgain.tracksUnsavedAccepts && Written(olderAgain) == Utc("2026-03-01T10:00:00.0000000Z"));
 
             return failures;
         }
@@ -2232,6 +2301,54 @@ namespace SceneBaselines
                 Object.DestroyImmediate(second);
             }
 
+            failures += CheckASuffixNeverTakesARealName();
+
+            return failures;
+        }
+
+        // ── A twin's suffix against an object really named like one ─────────────
+        //
+        // 🚨 Siblings "Crate", "Crate" and one actually named "Crate#2": the second twin was given
+        // "Crate#2", and the real "Crate#2" then arrived at a path already taken — two records with
+        // one path, and a path that sent the reader to whichever object came first.
+
+        private static int CheckASuffixNeverTakesARealName()
+        {
+            int failures = 0;
+
+            var holder = new GameObject("SuffixProbeHolder");
+
+            try
+            {
+                var twinA = new GameObject("Crate");
+                var twinB = new GameObject("Crate");
+                var realName = new GameObject("Crate#2");
+
+                twinA.transform.SetParent(holder.transform);
+                twinB.transform.SetParent(holder.transform);
+                realName.transform.SetParent(holder.transform);
+
+                List<string> paths = SceneCapture.CaptureSceneSnapshot().objects
+                    .Select(o => o.path)
+                    .Where(p => p.StartsWith("SuffixProbeHolder/", System.StringComparison.Ordinal))
+                    .ToList();
+
+                failures += Held("an object named like a suffix and its lookalike twins get three different paths",
+                    paths.Count == 3 && paths.Distinct().Count() == 3);
+
+                failures += Held("the object really named Crate#2 keeps its own name as its path",
+                    SceneCapture.FindByRecordedPath("SuffixProbeHolder/Crate#2") == realName);
+
+                failures += Held("the second twin is found at the suffix it was given instead",
+                    paths.Contains("SuffixProbeHolder/Crate#3") &&
+                    SceneCapture.FindByRecordedPath("SuffixProbeHolder/Crate#3") == twinB &&
+                    SceneCapture.FindByRecordedPath("SuffixProbeHolder/Crate") == twinA);
+            }
+            finally
+            {
+                Object.DestroyImmediate(holder);
+            }
+
             return failures;
         }
 
@@ -2284,8 +2401,28 @@ namespace SceneBaselines
                 FindingRollup.Build(ChangedItems(5, "pos").Concat(ChangedItems(5, "mass")).ToList()).Count == 2);
 
             // A value carrying a colon must not become the cluster key, or nothing would cluster.
-            failures += Held("the property name is read up to the FIRST colon",
+            failures += Held("the property name is read up to the first colon-space, not into the value",
                 FindingRollup.KeyOf("Skill1: (Base) → (ImpBaseAttack:MeleeAction)") == "Skill1");
+
+            // 🚨 And a NAME carrying a colon must not be cut short. Every component property is
+            // written "props:Component.field", so cutting at the first colon keyed all of them on
+            // "props" and grouped unrelated component edits under a cause nobody measured.
+            failures += Held("a component property keeps its whole name",
+                FindingRollup.KeyOf("props:BoxCollider.m_IsTrigger: false → true") == "props:BoxCollider.m_IsTrigger");
+
+            string[] unrelated =
+            {
+                "props:BoxCollider.m_IsTrigger: false → true", "props:Rigidbody.m_Mass: 1 → 40",
+                "props:Light.m_Intensity: 1 → 0", "props:AudioSource.m_Volume: 1 → 0", "props:Camera.m_FOV: 60 → 30"
+            };
+            failures += Held("five edits to five different components are not one group",
+                FindingRollup.Build(unrelated.Select((change, i) =>
+                    new FindingRollup.Item("changed", "Object" + i, new List<string> { change })).ToList()).Count == 5);
+
+            failures += Held("five edits to the same component property still are",
+                FindingRollup.Build(Enumerable.Range(0, 5).Select(i =>
+                    new FindingRollup.Item("changed", "Crate" + i,
+                        new List<string> { "props:BoxCollider.m_IsTrigger: false → true" })).ToList()).Count == 1);
 
             // The property the whole feature rests on: grouping is not filtering.
             List<FindingRollup.Item> mixed = subtree.Concat(ChangedItems(6, "pos")).ToList();
@@ -2660,6 +2797,52 @@ namespace SceneBaselines
 
             failures += Held("a report left with nothing is a pass, not a regression",
                 onlySettings.totalFindings == 0 && onlySettings.verdict == "pass");
+
+            // 🚨 A scene that compared nothing also has no findings. The filter used to rewrite
+            // EVERY finding-free scene as a pass — so the commit that adds a scene, or one whose
+            // parent could not be captured, read "PASS" for a scene nobody checked.
+            var withUnchecked = new RegressionReport.Report
+            {
+                verdict = "not-checked", exitCode = RegressionReport.ExitNotChecked, totalFindings = 1,
+                scenesChecked = 2, baselinesCompared = 1
+            };
+
+            var notCompared = new RegressionReport.ReportScene
+            {
+                sceneName = "New", scenePath = "Assets/New.unity", verdict = "not-checked",
+                headline = "NOT CHECKED — no baselines recorded for this scene yet, so nothing could be compared. This is not a pass.",
+                notCheckedReason = "no baselines recorded for this scene"
+            };
+
+            var emptiedByFilter = new RegressionReport.ReportScene
+            {
+                sceneName = "Menu", scenePath = "Assets/Menu.unity", verdict = "regressions",
+                headline = "REGRESSIONS FOUND — 1 across 1 of 1 baseline(s).", findingCount = 1, baselinesCompared = 1
+            };
+            var emptiedBaseline = new RegressionReport.ReportBaseline { id = "b3", verdict = "regressions" };
+            emptiedBaseline.findings.Add(Finding("settings-changed", "project/physics"));
+            emptiedByFilter.baselines.Add(emptiedBaseline);
+
+            withUnchecked.scenes.Add(notCompared);
+            withUnchecked.scenes.Add(emptiedByFilter);
+
+            InvokeSetAsideProjectSettings(withUnchecked);
+
+            failures += Held("a scene that compared nothing stays NOT CHECKED through the filter",
+                notCompared.verdict == "not-checked" && notCompared.headline.StartsWith("NOT CHECKED"));
+            failures += Held("a run with a scene that compared nothing is never a pass, and does not exit 0",
+                withUnchecked.verdict == "not-checked" && withUnchecked.exitCode == RegressionReport.ExitNotChecked &&
+                emptiedByFilter.verdict == "pass");
+
+            // What the report tells someone to DO about a scene it could not check. It used to say a
+            // baseline "is recorded automatically the next time a request verifies fully clean" — a
+            // sentence about the AI agent this package was split from; nothing here records on its own.
+            string rendered = RegressionReport.RenderMarkdown(withUnchecked);
+            failures += Held("the report never promises a baseline will be recorded automatically",
+                !rendered.Contains("automatically") && !rendered.Contains("request verifies") &&
+                rendered.Contains("Record Baseline for Open Scene"));
+            failures += Held("a scene that moved is told its baselines name the old path, not to record a first one",
+                RegressionReport.WhatToDoWhenNotChecked("the scene file no longer exists at this path").Contains("renamed or moved"));
 
             return failures;
         }
@@ -3087,6 +3270,76 @@ namespace SceneBaselines
 
             failures += Held("without a dependency list every commit with a parent is replayed",
                 chosen != null && chosen.Count == 5 && skipped == 0);
+
+            failures += CheckGitPathsAreReadAsWritten();
+
+            return failures;
+        }
+
+        // ── Does a non-ASCII path survive being read from git? ───────────────────
+        //
+        // 🚨 git writes paths as UTF-8, but a redirected stream is decoded with the console's
+        // encoding unless told otherwise — IBM437 in the Windows editor. "Assets/კარი.prefab" came
+        // back as mojibake, matched nothing the scenes depend on, and every commit touching it was
+        // skipped as irrelevant. The parsing tests above cannot see this: they never run git.
+        //
+        // Runs the replay's own git call against a throwaway repository, so it proves the decoding
+        // on whatever machine runs the suite.
+
+        private static int CheckGitPathsAreReadAsWritten()
+        {
+            int failures = 0;
+
+            MethodInfo git = typeof(HistoryReplay).GetMethod("Git", BindingFlags.NonPublic | BindingFlags.Static,
+                null, new[] { typeof(string), typeof(string), typeof(string).MakeByRefType() }, null);
+
+            if (git == null)
+                return Held("HistoryReplay still has a Git(directory, arguments) to test", false);
+
+            string Run(string directory, string arguments)
+            {
+                object[] args = { directory, arguments, null };
+                return (string)git.Invoke(null, args);
+            }
+
+            string repository = Path.Combine(Path.GetTempPath(),
+                "SceneBaselinesGitPaths-" + System.Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(repository, "Assets"));
+
+                if (Run(repository, "init -q") == null)
+                {
+                    // The replay needs git to exist at all; a machine without it cannot run one, and
+                    // there is nothing here to prove.
+                    Debug.LogWarning("[Scene Baselines] git is not available, so the path-decoding check was not run.");
+                    return 0;
+                }
+
+                const string name = "Assets/კარი.prefab";   // Assets/კარი.prefab
+                File.WriteAllText(Path.Combine(repository, name), "x");
+
+                Run(repository, "add -A");
+                Run(repository, "-c user.name=test -c user.email=test@example.com commit -q -m first");
+
+                string listed = Run(repository, "-c core.quotepath=false log --name-only --format= -n 1");
+
+                failures += Held("a non-ASCII path reads back from git exactly as it is spelled",
+                    listed != null && listed.Trim() == name);
+            }
+            finally
+            {
+                try
+                {
+                    // git marks its object files read-only, which Directory.Delete refuses on Windows.
+                    foreach (string file in Directory.GetFiles(repository, "*", SearchOption.AllDirectories))
+                        File.SetAttributes(file, FileAttributes.Normal);
+
+                    Directory.Delete(repository, true);
+                }
+                catch { /* a leftover temp folder is not worth failing a test over */ }
+            }
 
             return failures;
         }
