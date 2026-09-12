@@ -102,6 +102,7 @@ namespace SceneBaselines
         [Test, Order(29)] public void A_commit_says_how_far_it_reached() => Verify(CheckCommitScopeIsStated);
         [Test, Order(30)] public void A_replay_report_leads_with_findings() => Verify(CheckReplayReportLeadsWithFindings);
         [Test, Order(31)] public void A_filter_narrows_on_facts_and_hides_nothing_silently() => Verify(CheckReviewFilterNarrowsOnFacts);
+        [Test, Order(32)] public void An_addition_can_be_adopted_without_re_recording() => Verify(CheckAdditionsCanBeAdopted);
 
         // ── A scene of the suite's own ───────────────────────────────────────────
         //
@@ -315,6 +316,7 @@ namespace SceneBaselines
                 failures += CheckCommitScopeIsStated();
                 failures += CheckReplayReportLeadsWithFindings();
                 failures += CheckReviewFilterNarrowsOnFacts();
+                failures += CheckAdditionsCanBeAdopted();
             }
             finally
             {
@@ -1399,6 +1401,91 @@ namespace SceneBaselines
 
             failures += Held("accepting an added object records it as covered",
                 adopting.objects.Any(o => o.path == "Turret" && o.state == "hp=10"));
+
+            return failures;
+        }
+
+        // ── Can new work join a baseline without re-recording it? ────────────────
+        //
+        // 🚨 The gap a user found in the editor, not in a test. They made an object, saved, opened
+        // the review window and were told nothing differed. True, and useless: everything built
+        // since the baseline was unwatched, and the only way to change that was to re-record the
+        // scene — which adopts every other difference in it at the same time, read or not.
+        //
+        // So the property under test is not "additions are listed". It is that adopting one
+        // PROTECTS it: after the tick, losing that object has to be reported like any other loss.
+        // Silencing a line and covering an object look identical until exactly that moment.
+
+        private static int CheckAdditionsCanBeAdopted()
+        {
+            int failures = 0;
+
+            const string idA = "GlobalObjectId_V1-2-abc-111-0";
+            const string idB = "GlobalObjectId_V1-2-abc-222-0";
+            const string idC = "GlobalObjectId_V1-2-abc-333-0";
+
+            var recorded = new List<BaselineObjectRecord>
+            {
+                Rec("Player", "components=[Transform] pos(0,0,0)", idA)
+            };
+
+            var live = new List<BaselineObjectRecord>
+            {
+                Rec("Player", "components=[Transform] pos(0,0,0)", idA),
+                Rec("Square", "components=[Transform,SpriteRenderer] pos(2,0,0)", idB)
+            };
+
+            BaselineComparison offered = CompareObjects(recorded, live);
+
+            failures += Held("ordinary new work is still not a finding", offered.findings.Count == 0);
+            failures += Held("an added object is offered for adoption",
+                offered.newObjects.Count == 1 &&
+                offered.newObjects[0].path == "Square" &&
+                offered.newObjects[0].kind == RegressionKind.Added);
+            failures += Held("what is offered carries the identity and state accept needs",
+                offered.newObjects[0].liveId == idB &&
+                offered.newObjects[0].liveState.Contains("SpriteRenderer"));
+
+            // An addition the check already accuses is tickable on its own finding. Offering it a
+            // second time would ask for one decision in two places, and the second accept would find
+            // the object recorded and report itself skipped.
+            BaselineComparison accused = CompareObjects(recorded, new List<BaselineObjectRecord>
+            {
+                Rec("Player", "components=[Transform] pos(0,0,0)", idA),
+                Rec("Player (1)", "components=[Transform] pos(9,9,9)", idC)
+            });
+
+            failures += Held("an addition already reported is not offered twice",
+                accused.findings.Count == 1 && accused.newObjects.Count == 0);
+
+            // Adopted exactly as the window does it: the offered record, straight into accept.
+            Baseline baseline = Baseline(Rec("Player", "components=[Transform] pos(0,0,0)", idA));
+
+            BaselineAccept.Result outcome =
+                BaselineAccept.Apply(baseline, new List<RegressionFinding> { offered.newObjects[0] });
+
+            failures += Held("adopting an offered addition is accepted, not skipped",
+                outcome.acceptedCount == 1 && outcome.skippedCount == 0);
+            failures += Held("adopting one object leaves every other record as it was recorded",
+                baseline.objects.Count == 2 &&
+                baseline.objects.Any(o => o.path == "Player" &&
+                                          o.state == "components=[Transform] pos(0,0,0)"));
+
+            BaselineComparison afterwards = CompareObjects(baseline.objects, live);
+
+            failures += Held("an adopted object stops being offered",
+                afterwards.newObjects.Count == 0 && afterwards.findings.Count == 0);
+
+            // Silencing would have passed every assertion above. This is where the two part company.
+            BaselineComparison lost = CompareObjects(baseline.objects, new List<BaselineObjectRecord>
+            {
+                Rec("Player", "components=[Transform] pos(0,0,0)", idA)
+            });
+
+            failures += Held("losing an adopted object is reported like any other loss",
+                lost.findings.Count == 1 &&
+                lost.findings[0].kind == RegressionKind.Missing &&
+                lost.findings[0].path == "Square");
 
             return failures;
         }

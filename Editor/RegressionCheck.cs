@@ -165,6 +165,26 @@ namespace SceneBaselines
         public List<string> newObjectPaths = new List<string>();
 
         /// <summary>
+        /// Those same objects offered for adoption: records a reviewer can tick to have this
+        /// baseline start covering them, minus any the check has already reported as suspicious.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately NOT in <see cref="findings"/>, and deliberately not empty either.
+        ///
+        /// Not findings, because findings are what this tool is willing to call wrong — they fill
+        /// the report and set the CI exit code — and building something new is not wrong. Adding a
+        /// GameObject must never fail a build.
+        ///
+        /// Not empty, because until an added object is in the baseline it is UNPROTECTED: every
+        /// other object in the scene is watched while the newest one could be deleted tomorrow in
+        /// silence. Before this list the only way to close that gap was to re-record the whole
+        /// scene, which also adopts every other difference in it, including the ones nobody looked
+        /// at — the exact all-or-nothing that per-finding accept exists to replace. So an addition
+        /// gets the same unit of judgement as everything else: one object, one tick.
+        /// </remarks>
+        public List<RegressionFinding> newObjects = new List<RegressionFinding>();
+
+        /// <summary>
         /// Why this baseline could not be compared at all, or null when it was compared.
         /// </summary>
         /// <remarks>
@@ -428,6 +448,7 @@ namespace SceneBaselines
             comparison.newObjectPaths = added.Select(r => r.path ?? "").ToList();
 
             AddSuspiciousAdditions(comparison, baseline, added, live);
+            OfferAdditionsForAdoption(comparison, added);
 
             CompareAssets(comparison, baseline, liveAssets);
             CompareSettings(comparison, baseline, liveSettings);
@@ -574,6 +595,50 @@ namespace SceneBaselines
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Offers every remaining addition to the reviewer as something this baseline can grow to
+        /// cover, without re-recording the scene around it.
+        /// </summary>
+        /// <remarks>
+        /// Anything already accused above is left out. It is tickable on its own finding, and
+        /// listing it twice would ask for one decision in two places — then the second accept would
+        /// find the object already recorded, refuse, and report itself as skipped, which reads as
+        /// the tool half-failing at something it actually did.
+        /// </remarks>
+        private static void OfferAdditionsForAdoption(BaselineComparison comparison,
+            List<BaselineObjectRecord> added)
+        {
+            var accused = new HashSet<string>(
+                comparison.findings
+                    .Where(f => f.kind == RegressionKind.Added)
+                    .Select(f => f.path ?? ""),
+                StringComparer.Ordinal);
+
+            foreach (BaselineObjectRecord newcomer in added)
+            {
+                string path = newcomer.path ?? "";
+
+                if (path.Length == 0 || accused.Contains(path))
+                    continue;
+
+                comparison.newObjects.Add(new RegressionFinding
+                {
+                    path = path,
+                    livePath = path,
+                    liveId = newcomer.id ?? "",
+                    kind = RegressionKind.Added,
+
+                    // Nothing was recorded, so there is no "was" and no difference to name. Empty
+                    // rather than a sentence: the review window says what an unrecorded object is in
+                    // its own words, and a fabricated segment here would reach the filter menus and
+                    // offer the reviewer a category built out of prose.
+                    baselineState = "",
+                    liveState = newcomer.state ?? "",
+                    changedSegments = new List<string>()
+                });
+            }
         }
 
         /// <summary>"Enemies/Grunt#2" → "Grunt". The sibling suffix is display, not part of the name.</summary>

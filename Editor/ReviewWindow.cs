@@ -123,6 +123,7 @@ namespace SceneBaselines
                 List<BaselineComparison> older = comparable.Skip(1).ToList();
 
                 DrawCurrent(comparable[0], older);
+                DrawAdditions(comparable[0]);
                 DrawOnlyInOlder(comparable[0], older);
             }
 
@@ -171,13 +172,31 @@ namespace SceneBaselines
                 return $"{result.sceneName} — nothing compared";
 
             List<RegressionFinding> listed = ListedFindings();
+            string added = DescribeAdded();
 
             if (listed.Count == 0)
-                return $"{result.sceneName} — nothing differs";
+                return $"{result.sceneName} — nothing differs{added}";
 
             return filter.IsActive
-                ? $"{result.sceneName} — showing {filter.Apply(listed).Count} of {listed.Count} finding(s)"
-                : $"{result.sceneName} — {listed.Count} finding(s)";
+                ? $"{result.sceneName} — showing {filter.Apply(listed).Count} of {listed.Count} finding(s){added}"
+                : $"{result.sceneName} — {listed.Count} finding(s){added}";
+        }
+
+        /// <summary>
+        /// How many objects this window is offering to adopt, as a suffix for the count line.
+        /// </summary>
+        /// <remarks>
+        /// On the headline and not only in its own section, because "nothing differs" is the one
+        /// phrase a reviewer reads without scrolling — and a window that says that to someone who
+        /// just built a new object reads as a tool that missed it. It has not missed it; it is
+        /// declining to call new work breakage. That distinction has to survive being skimmed.
+        /// </remarks>
+        private string DescribeAdded()
+        {
+            BaselineComparison current = result.comparisons.FirstOrDefault(c => c.IsComparable);
+            int added = current == null ? 0 : current.newObjects.Count;
+
+            return added > 0 ? $" · {added} added" : "";
         }
 
         /// <summary>
@@ -472,15 +491,49 @@ namespace SceneBaselines
 
             if (comparison.newObjectCount > 0)
             {
+                // Stated up here as well as listed below, because the findings between the two can
+                // run to a whole screen, and "how much of my scene is this baseline actually
+                // watching" is a question the reviewer needs answered before they start ticking.
                 EditorGUILayout.LabelField($"   {comparison.newObjectCount} object(s) added since — " +
-                    "not regressions, and NOT covered by this baseline until it is re-recorded");
-
-                // Named as well as counted: a count cannot be checked against what the reviewer
-                // thinks they built, which is the only way to notice one they did not.
-                EditorGUILayout.LabelField(
-                    "      " + RegressionCheck.DescribeAddedPaths(comparison.newObjectPaths),
-                    EditorStyles.wordWrappedMiniLabel);
+                    "not regressions, and not covered until adopted; see ADDED SINCE below");
             }
+        }
+
+        /// <summary>
+        /// Objects this baseline has never seen — offered for adoption, never as breakage.
+        /// </summary>
+        /// <remarks>
+        /// This section exists because the alternative was re-recording the whole scene. Adding a
+        /// GameObject is the most ordinary thing a developer does, and it used to leave them with
+        /// two bad options: leave the object permanently unwatched, or re-record and thereby adopt
+        /// every other difference in the scene at once, including the ones nobody read. Per-finding
+        /// accept was built to kill that second option everywhere else; additions were the last
+        /// place it survived.
+        ///
+        /// Worded as an offer, not an accusation, and it says "not regressions" before it says
+        /// anything else. A list of the developer's own new work under a red heading is how a tool
+        /// teaches its user that its findings are noise — and the next line they skip is a real one.
+        ///
+        /// No filter is applied here. The filters narrow FINDINGS, and these are not findings; the
+        /// section always shows every added object, so nothing it holds can be hidden by a menu.
+        /// </remarks>
+        private void DrawAdditions(BaselineComparison comparison)
+        {
+            if (comparison.newObjects.Count == 0)
+                return;
+
+            EditorGUILayout.Space(10f);
+            EditorGUILayout.LabelField(
+                $"ADDED SINCE — {comparison.newObjects.Count} object(s), not regressions",
+                EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                "This baseline has never seen these, so nothing here is broken — but nothing here is " +
+                "protected either. Tick one to record it as known-good from now on. Everything else " +
+                "in the baseline is left exactly as it was recorded.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            foreach (RegressionFinding addition in comparison.newObjects)
+                DrawFinding(addition, 0);
         }
 
         /// <summary>How many OLDER baselines report the same thing as this finding.</summary>
@@ -542,6 +595,13 @@ namespace SceneBaselines
                 foreach (string segment in finding.changedSegments)
                     EditorGUILayout.LabelField("      " + segment, EditorStyles.wordWrappedMiniLabel);
             }
+            else if (finding.kind == RegressionKind.Added)
+            {
+                // An object the baseline never held has no "was" to differ from, so the was/now
+                // fallback below would print "was: (nothing)" and dress new work up as a change.
+                EditorGUILayout.LabelField(
+                    "      not recorded yet — accepting starts covering it, and changes nothing else");
+            }
             else if (!string.Equals(finding.baselineState, finding.liveState, StringComparison.Ordinal))
             {
                 // Segment diffing does not always find a difference it can name, and a finding with
@@ -573,7 +633,7 @@ namespace SceneBaselines
 
             foreach (BaselineComparison comparison in result.comparisons)
             {
-                foreach (RegressionFinding candidate in comparison.findings)
+                foreach (RegressionFinding candidate in Rows(comparison))
                 {
                     if (!string.Equals(Key(candidate), key, StringComparison.Ordinal))
                         continue;
@@ -584,6 +644,22 @@ namespace SceneBaselines
                         selected.Remove(candidate);
                 }
             }
+        }
+
+        /// <summary>
+        /// Everything in one comparison a reviewer can tick: the findings against it, and the
+        /// objects it does not yet cover.
+        /// </summary>
+        /// <remarks>
+        /// One list wherever selection and accept are concerned, two lists wherever breakage is
+        /// counted. An adoptable addition is a decision the reviewer makes in this window exactly
+        /// like a finding — same tick, same Accept button, same trip through
+        /// <see cref="BaselineAccept"/> — but it is not breakage, so it stays out of the finding
+        /// counts, the report and the CI exit code.
+        /// </remarks>
+        private static IEnumerable<RegressionFinding> Rows(BaselineComparison comparison)
+        {
+            return comparison.findings.Concat(comparison.newObjects);
         }
 
         /// <summary>
@@ -636,7 +712,7 @@ namespace SceneBaselines
             // Per baseline, because each baseline is its own file and its own known-good record.
             foreach (BaselineComparison comparison in result.comparisons)
             {
-                List<RegressionFinding> mine = comparison.findings
+                List<RegressionFinding> mine = Rows(comparison)
                     .Where(f => selected.Contains(f))
                     .ToList();
 

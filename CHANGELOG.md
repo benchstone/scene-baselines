@@ -4,6 +4,38 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-09-11
+
+### Added
+
+- **A new object can join a baseline without re-recording the scene.** Build something, open
+  Review Findings, and it is now listed under **ADDED SINCE** with a checkbox beside it. Tick it and
+  Accept, and the baseline starts covering that object from then on — every other record in the file
+  is left exactly as it was recorded.
+
+  Before this, an addition could only be looked at. The window named it and then told you it was not
+  covered "until the baseline is re-recorded", and re-recording is all-or-nothing: it adopts every
+  other difference in the scene at the same time, read or not, which is precisely what per-finding
+  accept exists to avoid. So the one edit a developer makes most often was the one edit the tool had
+  no per-object answer for, and the honest choices were to leave new work permanently unwatched or to
+  re-record and lose the review.
+
+  Adopting covers rather than silences: delete an adopted object afterwards and it is reported
+  MISSING, like anything else the baseline holds. That is the assertion the new test makes.
+
+- **The window's headline counts additions.** `nothing differs · 1 added` rather than
+  `nothing differs`. The count line is the one thing a reviewer reads without scrolling, and a scene
+  with a brand-new object in it that the tool calls "nothing differs" reads as a tool that missed it.
+
+### Changed
+
+- Additions are still **not findings**. They do not enter the report, do not count as breakage, and
+  cannot fail a check or a CI run — adding a GameObject is not a regression. What changed is only
+  that the review window now offers them, in a section of their own that says "not regressions"
+  before it says anything else. Additions the check already reports as suspicious — an exact
+  duplicate, a Unity-style copy, a second `AudioListener` — keep their own finding and are not
+  offered twice.
+
 ## [0.7.0] — 2026-09-10
 
 ### Added
