@@ -160,6 +160,22 @@ namespace SceneBaselines
         /// apart from a sibling with the same written name.
         /// </summary>
         public int liveOrderIndex = -1;
+
+        /// <summary>
+        /// What accepting this finding writes, when that is not <see cref="liveState"/>. Null
+        /// otherwise.
+        /// </summary>
+        /// <remarks>
+        /// Set when the live state carries an ordered list — the root order, a child list — that
+        /// also names objects this baseline does not cover. Accepting "the order changed" is a
+        /// decision about the objects the baseline knows; writing the live list verbatim would slip
+        /// every uncovered newcomer's name in beside them, and deleting one of those later would
+        /// then be reported against a baseline that never covered it. Those names are left out
+        /// here, and adopting the object later puts its name in where it sits.
+        ///
+        /// Kept apart from liveState on purpose: what the reviewer is SHOWN stays the real scene.
+        /// </remarks>
+        public string acceptState;
     }
 
     public class BaselineComparison
@@ -378,26 +394,43 @@ namespace SceneBaselines
             // twice — reported as unchanged while the rename went unmentioned.
             var claimed = new HashSet<BaselineObjectRecord>();
 
+            // Identity wins over path deliberately. If an object was renamed AND something new
+            // took its old path, the path lookup would pair the record with the newcomer and
+            // report the rename as "unchanged" plus a bogus change — the id pairs it correctly.
+            //
+            // 🚨 So every identity is claimed BEFORE any path is tried, not record by record. Done in
+            // one pass, a record whose object was deleted fell back to its path and took whatever
+            // stood there first — including an object another record owned by id. Delete "Door",
+            // rename "Door (1)" to "Door", and "Door" sorts first: it claimed the renamed object by
+            // path, "Door (1)" then found its own object taken and was reported MISSING, and
+            // accepting either finding rewrote the wrong record, so the finding came back every time.
+            var matchedByIdentity = new Dictionary<BaselineObjectRecord, BaselineObjectRecord>();
+
+            foreach (BaselineObjectRecord recorded in baseline.objects)
+            {
+                if (!string.IsNullOrEmpty(recorded.id) &&
+                    liveById.TryGetValue(recorded.id, out BaselineObjectRecord byId) &&
+                    claimed.Add(byId))
+                {
+                    matchedByIdentity[recorded] = byId;
+                }
+            }
+
+            // The recorded children of each parent, by name: what a parent's list held when capture
+            // wrote none, because it had fewer than two children.
+            Dictionary<string, List<string>> recordedChildNames = RecordedChildNames(baseline.objects);
+
             foreach (BaselineObjectRecord recorded in baseline.objects)
             {
                 string path = recorded.path ?? "";
                 string recordedState = recorded.state ?? "";
 
-                // Identity wins over path deliberately. If an object was renamed AND something new
-                // took its old path, the path lookup would pair the record with the newcomer and
-                // report the rename as "unchanged" plus a bogus change — the id pairs it correctly.
                 BaselineObjectRecord match = null;
-                bool matchedById = false;
+                bool matchedById = matchedByIdentity.TryGetValue(recorded, out match);
 
-                if (!string.IsNullOrEmpty(recorded.id) &&
-                    liveById.TryGetValue(recorded.id, out BaselineObjectRecord byId) &&
-                    !claimed.Contains(byId))
-                {
-                    match = byId;
-                    matchedById = true;
-                }
-                else if (liveByPath.TryGetValue(path, out BaselineObjectRecord byPath) &&
-                         !claimed.Contains(byPath))
+                if (!matchedById &&
+                    liveByPath.TryGetValue(path, out BaselineObjectRecord byPath) &&
+                    !claimed.Contains(byPath))
                 {
                     match = byPath;
                 }
@@ -426,7 +459,10 @@ namespace SceneBaselines
                 // parent's recorded order — so without this, the rule "additions are not
                 // regressions" quietly stopped applying the moment the added object had a parent,
                 // and routine content work reported its own parent as damage.
-                if (changed && OnlyOrderPreservingAdditions(recordedState, liveState))
+                if (changed && OnlyOrderPreservingAdditions(recordedState, liveState,
+                        recordedChildNames.TryGetValue(path, out List<string> children)
+                            ? children
+                            : new List<string>()))
                     changed = false;
 
                 // Reported as ONE finding, not as a move plus a change. Renaming or re-parenting an
@@ -483,7 +519,107 @@ namespace SceneBaselines
             CompareAssets(comparison, baseline, liveAssets);
             CompareSettings(comparison, baseline, liveSettings);
 
+            LeaveUncoveredNamesOutOfAccept(comparison);
+
             return comparison;
+        }
+
+        /// <summary>
+        /// Gives every finding whose accepted state would carry an uncovered object's name in an
+        /// ordered list an <see cref="RegressionFinding.acceptState"/> without that name.
+        /// </summary>
+        /// <remarks>
+        /// Only names whose place is KNOWN are taken out, and never from a list cut short at thirty:
+        /// there, which name capture would show in the freed place cannot be known. Both fall back
+        /// to writing the live list as before — the older, looser behaviour, never a guess.
+        /// </remarks>
+        private static void LeaveUncoveredNamesOutOfAccept(BaselineComparison comparison)
+        {
+            var uncovered = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+
+            foreach (RegressionFinding addition in comparison.findings
+                         .Where(f => f.kind == RegressionKind.Added)
+                         .Concat(comparison.newObjects))
+            {
+                if (string.IsNullOrEmpty(addition.liveOrderOwner) || addition.liveOrderIndex < 0)
+                    continue;
+
+                if (!uncovered.TryGetValue(addition.liveOrderOwner, out HashSet<int> positions))
+                    uncovered[addition.liveOrderOwner] = positions = new HashSet<int>();
+
+                positions.Add(addition.liveOrderIndex);
+            }
+
+            if (uncovered.Count == 0)
+                return;
+
+            foreach (RegressionFinding finding in comparison.findings)
+            {
+                if (finding.kind == RegressionKind.SettingsChanged &&
+                    finding.path == RootOrderKey &&
+                    uncovered.TryGetValue(RootOrderKey, out HashSet<int> rootPositions))
+                {
+                    List<string> covered = WithoutPositions(ListedNames(finding.liveState), rootPositions);
+
+                    if (covered != null)
+                        finding.acceptState = "roots=(" + string.Join(",", covered) + ")";
+                }
+                else if ((finding.kind == RegressionKind.Changed || finding.kind == RegressionKind.Moved) &&
+                         uncovered.TryGetValue(finding.livePath ?? finding.path ?? "", out HashSet<int> childPositions))
+                {
+                    List<string> covered = WithoutPositions(
+                        ListedNames(StateSegment(finding.liveState, "children")), childPositions);
+
+                    if (covered != null)
+                        finding.acceptState = WithChildList(finding.liveState, covered);
+                }
+            }
+        }
+
+        /// <summary>The names minus those at the given positions, or null for a list cut short.</summary>
+        private static List<string> WithoutPositions(List<string> names, HashSet<int> positions)
+        {
+            if (names.Count == 0 || names.Any(IsTruncationMarker))
+                return null;
+
+            return names.Where((name, index) => !positions.Contains(index)).ToList();
+        }
+
+        /// <summary>
+        /// An object's state with its child list set to these names, in exactly the shape capture
+        /// writes: no list below two names, and a new list straight after bounds, before any
+        /// component properties.
+        /// </summary>
+        /// <remarks>
+        /// Edited in place, never split and re-joined: the state string IS the comparison key, and
+        /// a single normalised space anywhere else would make the record mismatch an unchanged
+        /// object on the very next check.
+        /// </remarks>
+        internal static string WithChildList(string state, List<string> names)
+        {
+            state = state ?? "";
+            int start = FindStateSegment(state, key => key == "children", out int length);
+
+            if (names.Count < 2)
+            {
+                if (start < 0)
+                    return state;
+
+                int from = start > 0 ? start - 1 : start;
+                int to = start > 0 ? start + length : Math.Min(state.Length, start + length + 1);
+                return state.Remove(from, to - from);
+            }
+
+            string list = "children=(" + string.Join(",", names) + ")";
+
+            if (start >= 0)
+                return state.Substring(0, start) + list + state.Substring(start + length);
+
+            int props = FindStateSegment(state, key => key.StartsWith("props:", StringComparison.Ordinal), out _);
+
+            return props > 0
+                ? state.Insert(props - 1, " " + list)
+                : state + " " + list;
         }
 
         /// <summary>
@@ -749,15 +885,39 @@ namespace SceneBaselines
         /// dragging a Camera down the Hierarchy and being told nothing had changed. Asking "are the
         /// names I recorded still in this order, ignoring newcomers" answers both at once.
         /// </remarks>
-        private static bool OnlyOrderPreservingAdditions(string baselineState, string liveState)
+        /// <param name="recordedChildren">
+        /// For an object: the names of its recorded children. Only consulted when the recorded state
+        /// has no child list at all — see below. Null for a settings group, which has no children.
+        /// </param>
+        private static bool OnlyOrderPreservingAdditions(string baselineState, string liveState,
+            List<string> recordedChildren = null)
         {
             Dictionary<string, string> before = SplitStateSegments(baselineState);
             Dictionary<string, string> after = SplitStateSegments(liveState);
 
-            if (before.Count == 0 || before.Count != after.Count)
+            if (before.Count == 0)
                 return false;
 
             bool sawOrderList = false;
+
+            // Capture writes no child list below two children, so a parent's SECOND child makes the
+            // list appear rather than grow. Read as "a segment appeared", that reported the parent
+            // as changed for adding one object — the rule that additions are not regressions,
+            // broken for every parent that had exactly one child. The recorded children say what
+            // the absent list held: zero or one name, which the new list must still contain.
+            if (recordedChildren != null && recordedChildren.Count < 2 &&
+                !before.ContainsKey("children") && after.TryGetValue("children", out string appeared) &&
+                after.Count == before.Count + 1)
+            {
+                if (!IsOrderPreservingGrowth(recordedChildren, ListedNames(appeared)))
+                    return false;
+
+                sawOrderList = true;
+            }
+            else if (before.Count != after.Count)
+            {
+                return false;
+            }
 
             foreach (var kvp in before)
             {
@@ -772,13 +932,105 @@ namespace SceneBaselines
                 if (!OrderListKeys.Contains(kvp.Key))
                     return false;
 
-                if (!IsSubsequence(ListedNames(kvp.Value), ListedNames(now)))
+                if (!IsOrderPreservingGrowth(ListedNames(kvp.Value), ListedNames(now)))
                     return false;
 
                 sawOrderList = true;
             }
 
             return sawOrderList;
+        }
+
+        /// <summary>
+        /// Whether a live list is the recorded one with names added and nothing reordered or lost —
+        /// as far as two lists that may both be cut short can show.
+        /// </summary>
+        /// <remarks>
+        /// 🚨 Capture lists 30 names and then a count, "+2-more". Compared as plain names, that
+        /// count is a name too, and it changes with every addition: "+2-more" is not in
+        /// (…,"+3-more"), so adding ONE object to a scene with more than thirty top-level objects —
+        /// or under a parent with more than thirty children — reported the whole order as changed
+        /// and failed the build. Most real scenes are past thirty.
+        ///
+        /// So the counts are read as counts, and the names as far as each list shows them. Beyond
+        /// that, a newcomer placed high in the list pushes the last shown names out of the window;
+        /// that is still growth, but only if the names that dropped out are the recorded TAIL and
+        /// no more of them dropped out than objects were added. Anything else — a recorded name
+        /// gone from the middle, the list shrinking, a name leaving the window with nothing added —
+        /// is a change the lists can see, and is reported.
+        /// </remarks>
+        private static bool IsOrderPreservingGrowth(List<string> recorded, List<string> live)
+        {
+            List<string> recordedShown = ShownNames(recorded, out int recordedHidden);
+            List<string> liveShown = ShownNames(live, out int liveHidden);
+
+            if (recordedHidden < 0 || liveHidden < 0)
+                return false;
+
+            if (recordedHidden == 0 && liveHidden == 0)
+                return IsSubsequence(recordedShown, liveShown);
+
+            int growth = liveShown.Count + liveHidden - (recordedShown.Count + recordedHidden);
+            if (growth < 0)
+                return false;
+
+            // The recorded names the live window no longer shows must all sit at the end.
+            int stillShown = recordedShown.Count;
+            while (stillShown > 0 && !liveShown.Contains(recordedShown[stillShown - 1]))
+                stillShown--;
+
+            List<string> head = recordedShown.GetRange(0, stillShown);
+            int pushedOut = recordedShown.Count - stillShown;
+
+            if (head.Any(name => !liveShown.Contains(name)))
+                return false;
+
+            if (pushedOut > 0 && (liveHidden == 0 || pushedOut > growth))
+                return false;
+
+            return IsSubsequence(head, liveShown);
+        }
+
+        /// <summary>
+        /// The names a list shows, without its "+N-more" tail; <paramref name="hidden"/> is N, zero
+        /// for a list shown in full, or -1 when the tail cannot be read.
+        /// </summary>
+        private static List<string> ShownNames(List<string> names, out int hidden)
+        {
+            hidden = 0;
+
+            if (names.Count == 0 || !IsTruncationMarker(names[names.Count - 1]))
+                return names;
+
+            string marker = names[names.Count - 1];
+            string digits = marker.Substring(1, marker.Length - 1 - "-more".Length);
+
+            if (!int.TryParse(digits, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out hidden))
+                hidden = -1;
+
+            return names.GetRange(0, names.Count - 1);
+        }
+
+        /// <summary>Each recorded parent path → the written names of its recorded children.</summary>
+        private static Dictionary<string, List<string>> RecordedChildNames(List<BaselineObjectRecord> records)
+        {
+            var byParent = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+            foreach (BaselineObjectRecord record in records)
+            {
+                SplitPath(record.path, out string owner, out string name, out _);
+
+                if (owner == null)
+                    continue;
+
+                if (!byParent.TryGetValue(owner, out List<string> names))
+                    byParent[owner] = names = new List<string>();
+
+                names.Add(SceneCapture.Sanitise(name));
+            }
+
+            return byParent;
         }
 
         /// <summary>Moved names printed before the line stops being a summary.</summary>

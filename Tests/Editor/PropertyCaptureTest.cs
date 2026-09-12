@@ -1065,6 +1065,70 @@ namespace SceneBaselines
                 new Baseline { schemaVersion = BaselineStore.IdentitySchemaVersion - 1 }
                     .StateFormatComparable);
 
+            failures += CheckAPathCannotTakeAnotherRecordsObject();
+
+            return failures;
+        }
+
+        // ── Delete one object, rename its twin into the gap ──────────────────────
+        //
+        // 🚨 The most ordinary Unity edit there is: delete "Door", rename "Door (1)" to "Door".
+        // Matching went record by record, so "Door" — which sorts first — fell back to its path and
+        // took the renamed object before "Door (1)" could claim it by identity. The report said
+        // "Door" changed and "Door (1)" went missing, and accepting either rewrote the wrong record,
+        // so the finding came back after every accept. Asserted in both record orders, because
+        // which one came first is what decided the answer.
+
+        private static int CheckAPathCannotTakeAnotherRecordsObject()
+        {
+            int failures = 0;
+
+            const string idA = "GlobalObjectId_V1-2-abc-111-0";
+            const string idB = "GlobalObjectId_V1-2-abc-222-0";
+            const string first = "components=[Transform,MeshRenderer] pos(0,0,0)";
+            const string second = "components=[Transform,MeshRenderer] pos(5,0,0)";
+
+            var live = new List<BaselineObjectRecord> { Rec("Door", second, idB) };
+
+            foreach (bool deletedFirst in new[] { true, false })
+            {
+                string order = deletedFirst ? "deleted record first" : "renamed record first";
+
+                List<BaselineObjectRecord> recorded = deletedFirst
+                    ? new List<BaselineObjectRecord> { Rec("Door", first, idA), Rec("Door (1)", second, idB) }
+                    : new List<BaselineObjectRecord> { Rec("Door (1)", second, idB), Rec("Door", first, idA) };
+
+                BaselineComparison result = CompareObjects(recorded, live);
+
+                failures += Held($"a delete plus a rename into its name is one MISSING and one MOVED ({order})",
+                    result.findings.Count == 2 &&
+                    result.findings.Any(f => f.kind == RegressionKind.Missing && f.path == "Door") &&
+                    result.findings.Any(f => f.kind == RegressionKind.Moved && f.path == "Door (1)" &&
+                                             f.livePath == "Door"));
+
+                // Accepted with the root order recorded too, so the order bookkeeping meets the same
+                // two findings arriving in either order.
+                var liveRoots = new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", "roots=(Door)") };
+                Baseline baseline = Baseline(recorded.Select(r => Rec(r.path, r.state, r.id)).ToArray());
+                baseline.settings = new List<BaselineSettingsRecord>
+                {
+                    Setting("scene", "rootOrder", deletedFirst ? "roots=(Door,Door__1_)" : "roots=(Door__1_,Door)")
+                };
+
+                BaselineComparison withRoots = RegressionCheck.Compare(baseline, live,
+                    scenePersistedAfterCapture: true, liveSettings: liveRoots);
+                BaselineAccept.Result accepted = BaselineAccept.Apply(baseline,
+                    withRoots.findings.Where(f => f.kind != RegressionKind.SettingsChanged).ToList());
+
+                failures += Held($"accepting both leaves nothing to report, order included ({order})",
+                    accepted.acceptedCount == 2 && accepted.orderLeftAloneCount == 0 &&
+                    baseline.objects.Count == 1 && baseline.objects[0].id == idB &&
+                    baseline.objects[0].path == "Door" &&
+                    baseline.settings[0].state == "roots=(Door)" &&
+                    RegressionCheck.Compare(baseline, live, scenePersistedAfterCapture: true,
+                        liveSettings: liveRoots).findings.Count == 0);
+            }
+
             return failures;
         }
 
@@ -1187,6 +1251,113 @@ namespace SceneBaselines
             failures += Held("accepting a settings change records the new setting",
                 withSettings.settings[0].state == "gravity=-20");
 
+            failures += CheckAnUnsavedAcceptNeedsALaterSave();
+            failures += CheckTheAcceptDialogSaysWhatHappened();
+
+            return failures;
+        }
+
+        // ── Which save proves an unsaved accept reached disk? ────────────────────
+        //
+        // 🚨 A baseline accepted while the scene had unsaved changes holds state that was never
+        // written. Only a save made AFTER that accept proves otherwise — but the proof was measured
+        // from when the baseline was created, so any save between creation and the accept cleared
+        // the "unconfirmed" warning the accept had just raised.
+
+        private static int CheckAnUnsavedAcceptNeedsALaterSave()
+        {
+            int failures = 0;
+
+            const string created = "2026-01-01T10:00:00.0000000Z";
+            const string id = "GlobalObjectId_V1-2-abc-111-0";
+
+            List<RegressionFinding> AChange() => new List<RegressionFinding>
+            {
+                new RegressionFinding
+                {
+                    path = "Player", liveId = id, kind = RegressionKind.Changed,
+                    baselineState = "speed=5", liveState = "speed=6"
+                }
+            };
+
+            Baseline Fresh()
+            {
+                Baseline b = Baseline(Rec("Player", "speed=5", id));
+                b.createdUtc = created;
+                return b;
+            }
+
+            System.DateTime Utc(string value) => System.DateTime.Parse(value,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
+
+            System.DateTime Written(Baseline b) =>
+                b.TryGetStateWrittenUtc(out System.DateTime utc) ? utc : System.DateTime.MinValue;
+
+            Baseline untouched = Fresh();
+            failures += Held("a baseline nobody accepted into needs a save after its capture",
+                Written(untouched) == Utc(created));
+
+            Baseline unsaved = Fresh();
+            BaselineAccept.Apply(unsaved, AChange(), sceneHadUnsavedChanges: true);
+            failures += Held("an unsaved accept is recorded as unsaved, with its time",
+                unsaved.capturedFromUnsavedScene &&
+                unsaved.lastUnsavedAcceptUtc == unsaved.lastAcceptedUtc &&
+                !string.IsNullOrEmpty(unsaved.lastUnsavedAcceptUtc));
+            failures += Held("after an unsaved accept, only a save later than the accept proves the state",
+                Written(unsaved) > Utc(created) &&
+                Written(unsaved) == Utc(unsaved.lastUnsavedAcceptUtc));
+
+            Baseline saved = Fresh();
+            BaselineAccept.Apply(saved, AChange(), sceneHadUnsavedChanges: false);
+            failures += Held("an accept from a saved scene changes nothing about which save counts",
+                !saved.capturedFromUnsavedScene && string.IsNullOrEmpty(saved.lastUnsavedAcceptUtc) &&
+                Written(saved) == Utc(created));
+
+            // Written before the accept time was kept: it cannot say which accept was unsaved, so it
+            // assumes the latest — one save too many at worst, never one too few.
+            Baseline older = Fresh();
+            older.capturedFromUnsavedScene = true;
+            older.acceptedFindingCount = 2;
+            older.lastAcceptedUtc = "2026-03-01T10:00:00.0000000Z";
+            failures += Held("an older file marked unsaved waits for a save after its last accept",
+                Written(older) == Utc(older.lastAcceptedUtc));
+
+            return failures;
+        }
+
+        // ── Does the Accept dialog say what actually happened? ───────────────────
+        //
+        // The dialog is what a reviewer reads; the console is what they do not. It dropped the
+        // warning that a Hierarchy order was left alone, and it counted a baseline that could not be
+        // written as amended.
+
+        private static int CheckTheAcceptDialogSaysWhatHappened()
+        {
+            int failures = 0;
+
+            var written = new BaselineAccept.Result { acceptedCount = 1, assetPath = "Assets/SceneBaselines/a.json" };
+            var unplaced = new BaselineAccept.Result
+                { acceptedCount = 1, orderLeftAloneCount = 1, assetPath = "Assets/SceneBaselines/b.json" };
+            var notSaved = new BaselineAccept.Result { acceptedCount = 1, assetPath = null };
+
+            string clean = ReviewWindow.DescribeAcceptOutcome(1, new List<BaselineAccept.Result> { written });
+            failures += Held("a clean accept says it accepted, and nothing about order",
+                clean.StartsWith("Accepted 1 change(s)", System.StringComparison.Ordinal) &&
+                !clean.Contains("Hierarchy order"));
+
+            failures += Held("the dialog repeats that a Hierarchy order was left alone",
+                ReviewWindow.DescribeAcceptOutcome(1, new List<BaselineAccept.Result> { unplaced })
+                    .Contains("Hierarchy order was left as it was"));
+
+            string failed = ReviewWindow.DescribeAcceptOutcome(1, new List<BaselineAccept.Result> { notSaved });
+            failures += Held("a baseline that could not be written is never reported as accepted",
+                !failed.Contains("Accepted") && failed.Contains("could not be written"));
+
+            string partly = ReviewWindow.DescribeAcceptOutcome(1, new List<BaselineAccept.Result> { written, notSaved });
+            failures += Held("a partly written accept counts only the baselines written, and names the rest",
+                partly.Contains("across 1 baseline(s)") && partly.Contains("1 other baseline(s) could not be written"));
+
             return failures;
         }
 
@@ -1255,6 +1426,123 @@ namespace SceneBaselines
 
             failures += Held("reordering roots is reported",
                 CompareStates("roots=(Ground,Player)", "roots=(Player,Ground)").findings.Count == 1);
+
+            failures += CheckCutShortListsStillGrowSilently();
+            failures += CheckASecondChildIsStillAnAddition();
+
+            return failures;
+        }
+
+        // ── Past thirty names ────────────────────────────────────────────────────
+        //
+        // 🚨 Capture lists thirty names and then a count, "+2-more". Compared name by name, the count
+        // was a name too and changed with every addition, so adding ONE object to a scene with more
+        // than thirty top-level objects reported the root order as changed and failed the build.
+        // Most real scenes are past thirty; the suite's own lists never were.
+
+        private static int CheckCutShortListsStillGrowSilently()
+        {
+            int failures = 0;
+
+            // "R0".."R{n-1}" as capture writes it: thirty names shown, the rest counted.
+            string Listed(string key, IEnumerable<string> names)
+            {
+                List<string> all = names.ToList();
+                string shown = string.Join(",", all.Take(SceneCapture.MaxRecordedChildren));
+                int hidden = all.Count - SceneCapture.MaxRecordedChildren;
+                return $"{key}=({shown}{(hidden > 0 ? ",+" + hidden + "-more" : "")})";
+            }
+
+            List<string> Named(int count) => Enumerable.Range(0, count).Select(i => "R" + i).ToList();
+
+            List<string> recorded = Named(32);
+            string before = Listed("roots", recorded);
+
+            failures += Held("a cut-short list is written with its count, as this test assumes",
+                before.EndsWith(",R29,+2-more)", System.StringComparison.Ordinal));
+
+            failures += Held("adding one object to a scene past thirty roots is silent",
+                CompareStates(before, Listed("roots", recorded.Concat(new[] { "New" }))).findings.Count == 0);
+
+            failures += Held("adding one near the top, pushing a name out of the shown thirty, is silent",
+                CompareStates(before, Listed("roots", new[] { "New" }.Concat(recorded))).findings.Count == 0);
+
+            failures += Held("adding a child to a parent past thirty children is silent",
+                CompareStates(Listed("children", recorded),
+                    Listed("children", recorded.Concat(new[] { "New" }))).findings.Count == 0);
+
+            failures += Held("becoming cut short by the addition itself is silent",
+                CompareStates(Listed("roots", Named(30)), Listed("roots", Named(30).Concat(new[] { "New" })))
+                    .findings.Count == 0);
+
+            // What the lists CAN still see must still speak.
+            List<string> swapped = Named(32);
+            swapped[0] = "R1";
+            swapped[1] = "R0";
+            failures += Held("reordering shown names in a cut-short list is reported",
+                CompareStates(before, Listed("roots", swapped)).findings.Count == 1);
+
+            List<string> draggedDown = Named(32);
+            draggedDown.Remove("R29");
+            draggedDown.Add("R29");
+            failures += Held("a name dragged out of the shown thirty with nothing added is reported",
+                CompareStates(before, Listed("roots", draggedDown)).findings.Count == 1);
+
+            List<string> fromTheMiddle = Named(32);
+            fromTheMiddle.Remove("R5");
+            fromTheMiddle.Add("R5");
+            fromTheMiddle.Insert(0, "New");
+            failures += Held("a name gone from the middle is reported even alongside an addition",
+                CompareStates(before, Listed("roots", fromTheMiddle)).findings.Count == 1);
+
+            failures += Held("a cut-short list that shrank is reported",
+                CompareStates(before, Listed("roots", Named(31))).findings.Count == 1);
+
+            return failures;
+        }
+
+        // ── A parent's second child ──────────────────────────────────────────────
+        //
+        // Capture writes no child list below two children, so the second child makes the list
+        // APPEAR rather than grow — read as "a segment appeared", which reported the parent as
+        // changed for adding one object, and failed the build for it.
+
+        private static int CheckASecondChildIsStillAnAddition()
+        {
+            int failures = 0;
+
+            const string idParent = "GlobalObjectId_V1-2-abc-111-0";
+            const string idA = "GlobalObjectId_V1-2-abc-222-0";
+            const string idB = "GlobalObjectId_V1-2-abc-333-0";
+            const string idC = "GlobalObjectId_V1-2-abc-444-0";
+
+            const string parent = "components=[Transform,Grid] pos(0,0,0)";
+            const string props = " props:Grid(m_CellSize=1)";
+            BaselineObjectRecord childA = Rec("Level/A", "components=[Transform,MeshRenderer] pos(1,0,0)", idA);
+            BaselineObjectRecord childB = Rec("Level/B", "components=[Transform,Light] pos(2,0,0)", idB);
+            BaselineObjectRecord childC = Rec("Level/C", "components=[Transform,Camera] pos(3,0,0)", idC);
+
+            List<BaselineObjectRecord> Records(string parentState, params BaselineObjectRecord[] children) =>
+                new[] { Rec("Level", parentState, idParent) }.Concat(children).ToList();
+
+            failures += Held("a parent's second child is silent",
+                CompareObjects(Records(parent + props, childA),
+                    Records(parent + " children=(A,B)" + props, childA, childB)).findings.Count == 0);
+
+            failures += Held("a childless parent gaining two children is silent",
+                CompareObjects(Records(parent + props),
+                    Records(parent + " children=(A,B)" + props, childA, childB)).findings.Count == 0);
+
+            BaselineComparison replaced = CompareObjects(Records(parent + props, childA),
+                Records(parent + " children=(B,C)" + props, childB, childC));
+            failures += Held("a list appearing WITHOUT the recorded child still reports the parent",
+                replaced.findings.Any(f => f.kind == RegressionKind.Changed && f.path == "Level") &&
+                replaced.findings.Any(f => f.kind == RegressionKind.Missing && f.path == "Level/A"));
+
+            failures += Held("a real change on the parent is still reported when its list appears",
+                CompareObjects(Records(parent + props, childA),
+                    Records("components=[Transform,Grid] pos(0,5,0) children=(A,B)" + props, childA, childB))
+                    .findings.Count == 1);
 
             return failures;
         }
@@ -1489,6 +1777,7 @@ namespace SceneBaselines
 
             failures += CheckAdoptedObjectsKeepTheirPlace();
             failures += CheckDeletedAndMovedObjectsLeaveTheirPlace();
+            failures += CheckAcceptingAnOrderLeavesUncoveredNamesOut();
 
             return failures;
         }
@@ -1619,6 +1908,92 @@ namespace SceneBaselines
 
             failures += Held("a second child creates its parent's list exactly where capture writes it",
                 RegressionCheck.Compare(single, liveGrid, scenePersistedAfterCapture: true).findings.Count == 0);
+
+            return failures;
+        }
+
+        // ── Accepting an order does not adopt the objects in it ──────────────────
+        //
+        // Accepting "the root order changed" wrote the live list verbatim — including the names of
+        // new objects nobody had adopted. Deleting one of those later was then reported, against a
+        // baseline that had never covered it.
+
+        private static int CheckAcceptingAnOrderLeavesUncoveredNamesOut()
+        {
+            int failures = 0;
+
+            const string idA = "GlobalObjectId_V1-2-abc-111-0";
+            const string idB = "GlobalObjectId_V1-2-abc-222-0";
+            const string idTmp = "GlobalObjectId_V1-2-abc-333-0";
+
+            BaselineObjectRecord a = Rec("A", "components=[Transform,Camera] pos(0,0,0)", idA);
+            BaselineObjectRecord b = Rec("B", "components=[Transform,Light] pos(1,0,0)", idB);
+            BaselineObjectRecord tmp = Rec("Tmp", "components=[Transform,SpriteRenderer] pos(9,9,0)", idTmp);
+
+            List<BaselineSettingsRecord> Roots(string state) =>
+                new List<BaselineSettingsRecord> { Setting("scene", "rootOrder", state) };
+
+            Baseline Fresh()
+            {
+                Baseline baseline = Baseline(Rec(a.path, a.state, a.id), Rec(b.path, b.state, b.id));
+                baseline.settings = Roots("roots=(A,B)");
+                return baseline;
+            }
+
+            // Reordered, with an object nobody adopts sitting in the same list.
+            Baseline reorderOnly = Fresh();
+            BaselineComparison reordered = RegressionCheck.Compare(reorderOnly, new List<BaselineObjectRecord> { a, b, tmp },
+                scenePersistedAfterCapture: true, liveSettings: Roots("roots=(B,A,Tmp)"));
+            RegressionFinding orderFinding = reordered.findings.Single(f => f.kind == RegressionKind.SettingsChanged);
+
+            BaselineAccept.Apply(reorderOnly, new List<RegressionFinding> { orderFinding });
+
+            failures += Held("accepting a reorder records the reorder without the uncovered object",
+                reorderOnly.settings[0].state == "roots=(B,A)");
+            failures += Held("what the reviewer is shown is still the real scene",
+                orderFinding.liveState == "roots=(B,A,Tmp)");
+            failures += Held("deleting the object nobody adopted is not reported afterwards",
+                RegressionCheck.Compare(reorderOnly, new List<BaselineObjectRecord> { a, b },
+                    scenePersistedAfterCapture: true, liveSettings: Roots("roots=(B,A)")).findings.Count == 0);
+
+            // Reordered AND adopted in one accept, with the addition handed over FIRST: it must still
+            // end up in the list, not be overwritten by the reorder that follows it.
+            Baseline both = Fresh();
+            BaselineComparison bothFound = RegressionCheck.Compare(both, new List<BaselineObjectRecord> { a, b, tmp },
+                scenePersistedAfterCapture: true, liveSettings: Roots("roots=(B,A,Tmp)"));
+
+            BaselineAccept.Apply(both, bothFound.newObjects.Concat(bothFound.findings).ToList());
+
+            failures += Held("adopting and reordering together records both, whatever order they arrive in",
+                both.settings[0].state == "roots=(B,A,Tmp)" && both.objects.Any(o => o.path == "Tmp"));
+
+            // The same for a parent's child list.
+            const string idLevel = "GlobalObjectId_V1-2-abc-444-0";
+            Baseline level = Baseline(
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Floor,Wall)", idLevel),
+                Rec("Level/Floor", a.state, idA),
+                Rec("Level/Wall", b.state, idB));
+
+            var liveLevel = new List<BaselineObjectRecord>
+            {
+                Rec("Level", "components=[Transform] pos(0,0,0) children=(Wall,Floor,Tmp)", idLevel),
+                Rec("Level/Wall", b.state, idB),
+                Rec("Level/Floor", a.state, idA),
+                Rec("Level/Tmp", tmp.state, idTmp)
+            };
+
+            BaselineAccept.Apply(level, RegressionCheck.Compare(level, liveLevel, scenePersistedAfterCapture: true)
+                .findings.Where(f => f.path == "Level").ToList());
+
+            failures += Held("accepting a parent's reordered children leaves the uncovered child out",
+                level.objects.Any(o => o.path == "Level" &&
+                                       o.state == "components=[Transform] pos(0,0,0) children=(Wall,Floor)"));
+
+            liveLevel[0] = Rec("Level", "components=[Transform] pos(0,0,0) children=(Wall,Floor)", idLevel);
+            liveLevel.RemoveAt(3);
+
+            failures += Held("deleting that uncovered child is not reported afterwards",
+                RegressionCheck.Compare(level, liveLevel, scenePersistedAfterCapture: true).findings.Count == 0);
 
             return failures;
         }
@@ -2968,6 +3343,24 @@ namespace SceneBaselines
 
                 failures += Held("nothing was written into the project",
                     CountJsonFiles(projectFolder) == filesInProjectBefore);
+
+                // Accepting that the last recorded object was deleted leaves a baseline with no
+                // objects. Save refused that, and the reviewer was told to "see the console" for an
+                // error that was never logged.
+                Baseline lastOne = Baseline(Rec("Only", "speed=5", "GlobalObjectId_V1-2-abc-222-0"));
+                lastOne.id = id + "-empty";
+                lastOne.scenePath = "Assets/Scenes/NotOurs.unity";
+
+                BaselineAccept.Result emptied = BaselineAccept.Accept(lastOne, new List<RegressionFinding>
+                {
+                    new RegressionFinding { path = "Only", kind = RegressionKind.Missing, baselineState = "speed=5", liveState = "" }
+                });
+
+                failures += Held("accepting the deletion of the last object is written",
+                    emptied.Succeeded && BaselineStore.LoadAll().Any(b => b.id == lastOne.id && b.objects.Count == 0));
+
+                failures += Held("capture still cannot file an empty baseline by default",
+                    BaselineStore.Save(new Baseline { id = id + "-capture", objects = new List<BaselineObjectRecord>() }) == null);
             }
             finally
             {

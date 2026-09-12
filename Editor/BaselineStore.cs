@@ -125,6 +125,17 @@ namespace SceneBaselines
         /// <summary>When a finding was last accepted into this baseline. Empty if never.</summary>
         public string lastAcceptedUtc;
 
+        /// <summary>
+        /// When a finding was last accepted while the scene had unsaved changes. Empty if never, and
+        /// in every file written before this was recorded.
+        /// </summary>
+        /// <remarks>
+        /// A save of the scene proves this baseline's state reached disk only if it came AFTER that
+        /// state was written. Measured from <see cref="createdUtc"/> alone, a save made before an
+        /// unsaved accept cleared the warning that accept had just raised.
+        /// </remarks>
+        public string lastUnsavedAcceptUtc;
+
         /// <summary>True when part of this baseline was agreed to after the fact rather than recorded.</summary>
         public bool HasAcceptedFindings => acceptedFindingCount > 0;
 
@@ -205,6 +216,41 @@ namespace SceneBaselines
         /// not. It is the safe direction to be loose in — the alternative was a rule that could
         /// never say yes at all.
         /// </remarks>
+        /// <summary>
+        /// The moment after which a save of the scene proves this baseline's state reached disk: its
+        /// capture, or a later accept made while the scene had unsaved changes. False when the
+        /// capture time cannot be read.
+        /// </summary>
+        /// <remarks>
+        /// A file written before <see cref="lastUnsavedAcceptUtc"/> existed cannot say which of its
+        /// accepts was the unsaved one. When it is marked unsaved and has accepts at all, the latest
+        /// accept is used: that can ask for one save too many, never one too few, which is the
+        /// direction this rule is allowed to be wrong in.
+        /// </remarks>
+        public bool TryGetStateWrittenUtc(out DateTime writtenUtc)
+        {
+            if (!TryParseUtc(createdUtc, out writtenUtc))
+                return false;
+
+            string unsavedAccept = !string.IsNullOrWhiteSpace(lastUnsavedAcceptUtc)
+                ? lastUnsavedAcceptUtc
+                : capturedFromUnsavedScene && acceptedFindingCount > 0 ? lastAcceptedUtc : null;
+
+            if (TryParseUtc(unsavedAccept, out DateTime accepted) && accepted > writtenUtc)
+                writtenUtc = accepted;
+
+            return true;
+        }
+
+        private static bool TryParseUtc(string value, out DateTime utc)
+        {
+            bool parsed = DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out utc);
+
+            utc = parsed ? utc.ToUniversalTime() : default;
+            return parsed;
+        }
+
         public bool StateReachedDisk(bool scenePersistedAfterCapture)
         {
             return !ProvenanceUnknown && (!capturedFromUnsavedScene || scenePersistedAfterCapture);
@@ -509,9 +555,14 @@ namespace SceneBaselines
         /// Writes a baseline and returns its asset path, or null if it was skipped or failed.
         /// Never throws: a storage problem must not break the verification pass that called it.
         /// </summary>
-        public static string Save(Baseline baseline)
+        /// <param name="allowEmpty">
+        /// Write a baseline that records no objects. Off by default because a capture that found
+        /// nothing is almost always a capture that went wrong; on for accept, where a reviewer
+        /// deciding the last recorded object was meant to be deleted leaves exactly that.
+        /// </param>
+        public static string Save(Baseline baseline, bool allowEmpty = false)
         {
-            if (baseline == null || baseline.objects == null || baseline.objects.Count == 0)
+            if (baseline == null || baseline.objects == null || (baseline.objects.Count == 0 && !allowEmpty))
                 return null;
 
             try
@@ -686,8 +737,9 @@ namespace SceneBaselines
             if (baseline == null || string.IsNullOrWhiteSpace(baseline.scenePath))
                 return false;
 
-            if (!DateTime.TryParse(baseline.createdUtc, CultureInfo.InvariantCulture,
-                    DateTimeStyles.RoundtripKind, out DateTime captured))
+            // Not createdUtc alone: an accept made with unsaved changes wrote state later than that,
+            // and only a save after IT proves anything about it.
+            if (!baseline.TryGetStateWrittenUtc(out DateTime written))
                 return false;
 
             try
@@ -698,7 +750,7 @@ namespace SceneBaselines
                 if (!File.Exists(absolute))
                     return false;
 
-                return File.GetLastWriteTimeUtc(absolute) > captured.ToUniversalTime();
+                return File.GetLastWriteTimeUtc(absolute) > written;
             }
             catch (Exception e)
             {

@@ -4,6 +4,47 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-09-13
+
+### Fixed
+
+- **Adding an object to a scene with more than thirty top-level objects no longer fails the
+  check.** Capture lists thirty names and then a count, `+2-more`, and that count was compared as if
+  it were a name — so it changed with every addition and the whole root order was reported as
+  changed. The same happened under any parent with more than thirty children. The count is now read
+  as a count: growth is silent, including a newcomer high in the list that pushes a name out of the
+  thirty shown, while a reorder, a list that shrank, or a name leaving the shown thirty with nothing
+  added is still reported.
+- **A parent's second child is no longer reported as a change to the parent.** Capture writes no
+  child list below two children, so the second child made the list appear rather than grow, which
+  was read as a new value on the parent. It is now compared against the parent's recorded children
+  like any other growing list.
+- **Deleting an object and renaming its twin into its name is reported correctly, and accepting it
+  sticks.** Delete `Door`, rename `Door (1)` to `Door`: matching went record by record, so `Door`
+  took the renamed object by name before `Door (1)` could claim it by identity. The report said
+  `Door` changed and `Door (1)` went missing, and accepting either rewrote the wrong record, so the
+  finding came back after every accept. Identities are now all claimed before any name is tried,
+  and accept matches every finding to its record, and takes names out of the recorded order, before
+  it rewrites anything — so the result no longer depends on the order the findings arrive in.
+- **An accept made with unsaved changes stays "unconfirmed" until the scene is saved after it.**
+  Whether a baseline's state reached disk was measured from when the baseline was created, so any
+  save between creation and the accept cleared the warning the accept had just raised. Baselines now
+  record when an unsaved accept happened (`lastUnsavedAcceptUtc`, additive — no schema change). A
+  file written before this that is marked unsaved and has accepts waits for a save after its latest
+  accept, since it cannot say which accept was the unsaved one: one save too many at worst, never
+  one too few.
+- **Accepting a changed order no longer adopts the objects in it.** Accepting a reordered root order
+  or child list wrote the live list verbatim, including the names of new objects nobody had
+  adopted, so deleting one of those later was reported against a baseline that never covered it.
+  Those names are now left out of what is written — the finding still shows the real scene — and
+  adopting the object, in the same accept or later, puts its name in where it sits.
+- **Accepting the deletion of a baseline's last object is written.** Saving refused a baseline with
+  no objects, and the reviewer was told to see the console for an error that was never logged.
+  Capture still refuses to file an empty baseline.
+- **The Accept dialog says everything that happened.** The warning that a Hierarchy order was left
+  alone went only to the console, and a baseline that could not be written still counted as
+  amended. Both are now in the dialog, and only baselines actually written are counted.
+
 ## [0.8.0] — 2026-09-11
 
 ### Added

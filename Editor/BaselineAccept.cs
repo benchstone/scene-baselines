@@ -81,20 +81,15 @@ namespace SceneBaselines
         /// </remarks>
         public static Result Accept(Baseline baseline, List<RegressionFinding> findings)
         {
-            Result result = Apply(baseline, findings);
+            Result result = Apply(baseline, findings, SceneManager.GetActiveScene().isDirty);
 
             if (result.acceptedCount == 0)
                 return result;
 
-            // The accepted state came from the scene as it is NOW, so if that scene is dirty this
-            // baseline now contains state that never reached disk. Recorded so later checks keep
-            // saying "unconfirmed" instead of claiming they can prove breakage against it. Only ever
-            // set, never cleared: one accepted-from-dirty record is enough to weaken the whole file,
-            // and nothing here can tell which records are still disk-backed.
-            if (SceneManager.GetActiveScene().isDirty)
-                baseline.capturedFromUnsavedScene = true;
-
-            result.assetPath = BaselineStore.Save(baseline);
+            // Allowed to be empty: accepting that the last recorded object was deleted is a real
+            // decision, and refusing to write it left the reviewer told to "see the console" for an
+            // error that was never logged. It is capture that must not file an empty baseline.
+            result.assetPath = BaselineStore.Save(baseline, allowEmpty: true);
 
             if (string.IsNullOrEmpty(result.assetPath))
             {
@@ -130,6 +125,16 @@ namespace SceneBaselines
         /// </remarks>
         public static Result Apply(Baseline baseline, List<RegressionFinding> findings)
         {
+            return Apply(baseline, findings, sceneHadUnsavedChanges: false);
+        }
+
+        /// <param name="sceneHadUnsavedChanges">
+        /// Whether the scene the findings came from had unsaved changes. Supplied by the caller so
+        /// this stays free of scene access; <see cref="Accept"/> reads it from the open scene.
+        /// </param>
+        public static Result Apply(Baseline baseline, List<RegressionFinding> findings,
+            bool sceneHadUnsavedChanges)
+        {
             var result = new Result();
 
             if (baseline == null)
@@ -148,7 +153,56 @@ namespace SceneBaselines
             // matching against it would shift the list under the iteration and skip records.
             var toRemove = new List<BaselineObjectRecord>();
 
+            // Every finding is matched to its record BEFORE any record is rewritten. Matching while
+            // rewriting made the answer depend on order: accept "Door (1) renamed to Door" first and
+            // its record now answers to "Door", so the "Door went missing" finding that followed
+            // found the renamed record by path and removed the wrong object.
+            var recordFor = new Dictionary<RegressionFinding, BaselineObjectRecord>();
+
             foreach (RegressionFinding finding in findings)
+            {
+                if (finding != null && !recordFor.ContainsKey(finding) &&
+                    (finding.kind == RegressionKind.Missing || finding.kind == RegressionKind.Moved ||
+                     finding.kind == RegressionKind.Changed))
+                {
+                    recordFor[finding] = FindObjectRecord(baseline, finding);
+                }
+            }
+
+            // Names leave the recorded order first, all of them, while every record still has the
+            // path it was recorded at — and only then are records rewritten and names put back. Done
+            // object by object, a rename accepted early changed which same-named siblings the next
+            // removal counted, so the same selection could succeed or refuse depending on the order
+            // the findings happened to arrive in.
+            //
+            // Records in this set have no name in any recorded list right now: deleted objects for
+            // good, moved ones until they are placed again.
+            var outOfOrder = new HashSet<BaselineObjectRecord>();
+            var orderNotRemoved = new HashSet<BaselineObjectRecord>();
+
+            foreach (RegressionFinding finding in findings)
+            {
+                if (finding == null ||
+                    (finding.kind != RegressionKind.Missing && finding.kind != RegressionKind.Moved))
+                    continue;
+
+                BaselineObjectRecord record = recordFor[finding];
+
+                if (record == null || outOfOrder.Contains(record))
+                    continue;
+
+                if (!RemoveFromRecordedOrder(baseline, record, outOfOrder))
+                    orderNotRemoved.Add(record);
+
+                outOfOrder.Add(record);
+            }
+
+            // Additions go last. Accepting a changed order writes the list of objects the baseline
+            // covers; an object adopted in the same accept must be placed into THAT list, or the
+            // overwrite that followed it would drop the name it had just been given.
+            foreach (RegressionFinding finding in findings
+                         .Where(f => f == null || f.kind != RegressionKind.Added)
+                         .Concat(findings.Where(f => f != null && f.kind == RegressionKind.Added)))
             {
                 if (finding == null)
                 {
@@ -161,19 +215,20 @@ namespace SceneBaselines
                 switch (finding.kind)
                 {
                     case RegressionKind.Missing:
-                        applied = AcceptMissing(baseline, finding, toRemove, result);
+                        applied = AcceptMissing(recordFor[finding], toRemove, orderNotRemoved, result);
                         break;
 
                     case RegressionKind.Moved:
-                        applied = AcceptMoved(baseline, finding, toRemove, result);
+                        applied = AcceptMoved(baseline, finding, recordFor[finding], toRemove,
+                            outOfOrder, orderNotRemoved, result);
                         break;
 
                     case RegressionKind.Changed:
-                        applied = AcceptChanged(baseline, finding);
+                        applied = AcceptChanged(recordFor[finding], finding);
                         break;
 
                     case RegressionKind.Added:
-                        applied = AcceptAdded(baseline, finding, toRemove, result);
+                        applied = AcceptAdded(baseline, finding, outOfOrder, result);
                         break;
 
                     case RegressionKind.AssetChanged:
@@ -209,6 +264,18 @@ namespace SceneBaselines
             baseline.acceptedFindingCount += result.acceptedCount;
             baseline.lastAcceptedUtc = BaselineStore.CreateTimestampUtc();
 
+            // The accepted state came from the scene as it is NOW, so if that scene has unsaved
+            // changes this baseline now holds state that never reached disk. The flag is only ever
+            // set, never cleared: one such accept weakens the whole file, and nothing here can tell
+            // which records are still disk-backed. The TIME is kept too, because only a save made
+            // after this moment can prove the state reached disk — a save before it proves nothing
+            // about a state that did not exist yet.
+            if (sceneHadUnsavedChanges)
+            {
+                baseline.capturedFromUnsavedScene = true;
+                baseline.lastUnsavedAcceptUtc = baseline.lastAcceptedUtc;
+            }
+
             return result;
         }
 
@@ -218,15 +285,15 @@ namespace SceneBaselines
         /// Accepting a deletion drops the record, and the object's name from the order it sat in;
         /// the object is meant to be gone.
         /// </summary>
-        private static bool AcceptMissing(Baseline baseline, RegressionFinding finding,
-            List<BaselineObjectRecord> toRemove, Result result)
+        private static bool AcceptMissing(BaselineObjectRecord record, List<BaselineObjectRecord> toRemove,
+            HashSet<BaselineObjectRecord> orderNotRemoved, Result result)
         {
-            BaselineObjectRecord record = FindObjectRecord(baseline, finding);
-            if (record == null)
+            // Null when unmatched; already queued when two findings named the same record.
+            if (record == null || toRemove.Contains(record))
                 return false;
 
-            // Before it joins toRemove: it is still one of its same-named siblings until then.
-            if (!RemoveFromRecordedOrder(baseline, record, toRemove))
+            // Its name already left the recorded order, before any record was rewritten.
+            if (orderNotRemoved.Contains(record))
                 result.orderLeftAloneCount++;
 
             toRemove.Add(record);
@@ -244,34 +311,36 @@ namespace SceneBaselines
         /// reviewer has just accepted.
         /// </remarks>
         private static bool AcceptMoved(Baseline baseline, RegressionFinding finding,
-            List<BaselineObjectRecord> toRemove, Result result)
+            BaselineObjectRecord record, List<BaselineObjectRecord> toRemove,
+            HashSet<BaselineObjectRecord> outOfOrder, HashSet<BaselineObjectRecord> orderNotRemoved,
+            Result result)
         {
-            BaselineObjectRecord record = FindObjectRecord(baseline, finding);
-            if (record == null)
+            if (record == null || toRemove.Contains(record) || !outOfOrder.Contains(record))
                 return false;
 
-            bool orderKept = RemoveFromRecordedOrder(baseline, record, toRemove);
-
             record.path = finding.livePath ?? record.path;
-            record.state = finding.liveState ?? record.state;
+            record.state = finding.acceptState ?? finding.liveState ?? record.state;
 
-            // Not short-circuited: a name that could not be taken out of the old list can still be
-            // put into the new one.
-            orderKept &= PlaceInRecordedOrder(baseline, finding, record, toRemove);
+            // Back among the listed from here on, under its new path.
+            outOfOrder.Remove(record);
 
-            if (!orderKept)
+            // Its old name already left the old list; a name that could not be taken out there can
+            // still be put into the new one, so this is not short-circuited.
+            bool placed = PlaceInRecordedOrder(baseline, finding, record, outOfOrder);
+
+            if (orderNotRemoved.Contains(record) || !placed)
                 result.orderLeftAloneCount++;
 
             return true;
         }
 
-        private static bool AcceptChanged(Baseline baseline, RegressionFinding finding)
+        private static bool AcceptChanged(BaselineObjectRecord record, RegressionFinding finding)
         {
-            BaselineObjectRecord record = FindObjectRecord(baseline, finding);
             if (record == null)
                 return false;
 
-            record.state = finding.liveState ?? record.state;
+            // acceptState when the live child list names objects this baseline does not cover.
+            record.state = finding.acceptState ?? finding.liveState ?? record.state;
             return true;
         }
 
@@ -289,7 +358,7 @@ namespace SceneBaselines
         /// matched against it on the next check, and one of them would report MISSING forever.
         /// </remarks>
         private static bool AcceptAdded(Baseline baseline, RegressionFinding finding,
-            List<BaselineObjectRecord> toRemove, Result result)
+            HashSet<BaselineObjectRecord> outOfOrder, Result result)
         {
             if (baseline.objects == null)
                 return false;
@@ -316,7 +385,7 @@ namespace SceneBaselines
 
             baseline.objects.Add(record);
 
-            if (!PlaceInRecordedOrder(baseline, finding, record, toRemove))
+            if (!PlaceInRecordedOrder(baseline, finding, record, outOfOrder))
                 result.orderLeftAloneCount++;
 
             return true;
@@ -356,7 +425,7 @@ namespace SceneBaselines
         /// </summary>
         /// <param name="exclude">A record that is not (yet) one of the owner's children.</param>
         private static RecordedOrder FindRecordedOrder(Baseline baseline, string ownerPath, string ownerId,
-            BaselineObjectRecord exclude, List<BaselineObjectRecord> toRemove)
+            BaselineObjectRecord exclude, HashSet<BaselineObjectRecord> outOfOrder)
         {
             if (ownerPath == null)
             {
@@ -398,7 +467,7 @@ namespace SceneBaselines
             // count kept it off the record, and rebuilding it would be a guess.
             List<BaselineObjectRecord> children = baseline.objects.Where(o =>
             {
-                if (o == exclude || toRemove.Contains(o))
+                if (o == exclude || outOfOrder.Contains(o))
                     return false;
 
                 RegressionCheck.SplitPath(o.path, out string owner, out _, out _);
@@ -430,37 +499,7 @@ namespace SceneBaselines
                 return;
             }
 
-            string state = order.parent.state ?? "";
-            int start = RegressionCheck.FindStateSegment(state, key => key == "children", out int length);
-
-            // Capture writes " children=(...)" only from two children up, straight after bounds and
-            // before any component properties. Anything else and the record would mismatch an
-            // untouched parent on the very next check.
-            if (names.Count < 2)
-            {
-                if (start < 0)
-                    return;
-
-                int from = start > 0 ? start - 1 : start;
-                int to = start > 0 ? start + length : Math.Min(state.Length, start + length + 1);
-                order.parent.state = state.Remove(from, to - from);
-                return;
-            }
-
-            string list = "children=(" + string.Join(",", names) + ")";
-
-            if (start >= 0)
-            {
-                order.parent.state = state.Substring(0, start) + list + state.Substring(start + length);
-                return;
-            }
-
-            int props = RegressionCheck.FindStateSegment(state,
-                key => key.StartsWith("props:", StringComparison.Ordinal), out _);
-
-            order.parent.state = props > 0
-                ? state.Insert(props - 1, " " + list)
-                : state + " " + list;
+            order.parent.state = RegressionCheck.WithChildList(order.parent.state, names);
         }
 
         /// <summary>
@@ -474,7 +513,7 @@ namespace SceneBaselines
         /// Hierarchy is never reported, for an object the reviewer was just told is now covered.
         /// </remarks>
         private static bool PlaceInRecordedOrder(Baseline baseline, RegressionFinding finding,
-            BaselineObjectRecord self, List<BaselineObjectRecord> toRemove)
+            BaselineObjectRecord self, HashSet<BaselineObjectRecord> outOfOrder)
         {
             if (string.IsNullOrEmpty(finding.liveOrderOwner))
                 return true;
@@ -483,7 +522,7 @@ namespace SceneBaselines
                 ? null
                 : finding.liveOrderOwner;
 
-            RecordedOrder order = FindRecordedOrder(baseline, ownerPath, finding.liveOrderOwnerId, self, toRemove);
+            RecordedOrder order = FindRecordedOrder(baseline, ownerPath, finding.liveOrderOwnerId, self, outOfOrder);
 
             if (order == null)
                 return true;
@@ -517,11 +556,11 @@ namespace SceneBaselines
         /// records disagree about how many there are, which one to remove would be a guess.
         /// </remarks>
         private static bool RemoveFromRecordedOrder(Baseline baseline, BaselineObjectRecord record,
-            List<BaselineObjectRecord> toRemove)
+            HashSet<BaselineObjectRecord> outOfOrder)
         {
             RegressionCheck.SplitPath(record.path, out string ownerPath, out string name, out int twin);
 
-            RecordedOrder order = FindRecordedOrder(baseline, ownerPath, null, null, toRemove);
+            RecordedOrder order = FindRecordedOrder(baseline, ownerPath, null, null, outOfOrder);
 
             if (order == null)
                 return true;
@@ -533,7 +572,7 @@ namespace SceneBaselines
 
             foreach (BaselineObjectRecord other in baseline.objects)
             {
-                if (toRemove.Contains(other))
+                if (outOfOrder.Contains(other))
                     continue;
 
                 RegressionCheck.SplitPath(other.path, out string otherOwner, out string otherName, out int otherTwin);
@@ -584,7 +623,8 @@ namespace SceneBaselines
             if (record == null)
                 return false;
 
-            record.state = finding.liveState ?? record.state;
+            // acceptState when the live root order names objects this baseline does not cover.
+            record.state = finding.acceptState ?? finding.liveState ?? record.state;
             return true;
         }
 

@@ -703,11 +703,8 @@ namespace SceneBaselines
 
         private void AcceptSelected()
         {
-            int accepted = 0;
-            int skipped = 0;
             int changes = SelectedChangeCount;
-            int baselinesAmended = 0;
-            var messages = new List<string>();
+            var outcomes = new List<BaselineAccept.Result>();
 
             // Per baseline, because each baseline is its own file and its own known-good record.
             foreach (BaselineComparison comparison in result.comparisons)
@@ -719,31 +716,68 @@ namespace SceneBaselines
                 if (mine.Count == 0)
                     continue;
 
-                BaselineAccept.Result outcome =
-                    BaselineAccept.Accept(comparison.baseline, mine);
+                BaselineAccept.Result outcome = BaselineAccept.Accept(comparison.baseline, mine);
+                outcomes.Add(outcome);
 
-                accepted += outcome.acceptedCount;
-                skipped += outcome.skippedCount;
-                baselinesAmended++;
-                messages.Add(outcome.message);
+                if (outcome.acceptedCount > 0 && !outcome.Succeeded)
+                    Debug.LogWarning("[Scene Baselines] " + outcome.message);
+                else
+                    Debug.Log("[Scene Baselines] " + outcome.message);
             }
-
-            foreach (string message in messages)
-                Debug.Log("[Scene Baselines] " + message);
 
             // Re-checked immediately so the window shows the consequence of the decision rather than
             // the state that led to it — an accepted finding must visibly stop being a finding.
             Recheck();
 
-            // Counted in changes rather than in records rewritten, because one change accepted across
-            // three baselines is still one decision the user made.
-            EditorUtility.DisplayDialog("Accept findings",
-                accepted == 0
-                    ? "Nothing was accepted — see the console for why."
-                    : $"Accepted {changes} change(s) as intentional, across {baselinesAmended} baseline(s)." +
-                      (skipped > 0 ? $" {skipped} could not be matched and were left alone." : "") +
-                      "\n\nYour scene was not modified.",
-                "OK");
+            EditorUtility.DisplayDialog("Accept findings", DescribeAcceptOutcome(changes, outcomes), "OK");
+        }
+
+        /// <summary>
+        /// What the Accept dialog says, from what each baseline's accept actually did.
+        /// </summary>
+        /// <remarks>
+        /// Everything a baseline's own message warns about is repeated here, because the dialog is
+        /// what the reviewer reads and the console is what they do not. Two things used to be lost on
+        /// the way: a Hierarchy order left alone was mentioned only in the console, and a baseline
+        /// that could not be WRITTEN still counted as amended — "Accepted 1 change" over a file that
+        /// never changed on disk.
+        ///
+        /// Counted in changes rather than in records rewritten, because one change accepted across
+        /// three baselines is still one decision the user made.
+        /// </remarks>
+        public static string DescribeAcceptOutcome(int changes, List<BaselineAccept.Result> outcomes)
+        {
+            List<BaselineAccept.Result> written = outcomes.Where(o => o.Succeeded).ToList();
+            int notWritten = outcomes.Count(o => o.acceptedCount > 0 && !o.Succeeded);
+
+            if (written.Count == 0)
+            {
+                return notWritten > 0
+                    ? $"Nothing was saved: {notWritten} baseline(s) could not be written — see the console. " +
+                      "The baselines on disk are unchanged.\n\nYour scene was not modified."
+                    : "Nothing was accepted — see the console for why.";
+            }
+
+            int skipped = written.Sum(o => o.skippedCount);
+            int orderLeftAlone = written.Sum(o => o.orderLeftAloneCount);
+
+            var text = new System.Text.StringBuilder(
+                $"Accepted {changes} change(s) as intentional, across {written.Count} baseline(s).");
+
+            if (skipped > 0)
+                text.Append($" {skipped} could not be matched and were left alone.");
+
+            if (orderLeftAlone > 0)
+                text.Append($" For {orderLeftAlone} object(s) the recorded Hierarchy order was left as it was, " +
+                            "because updating it would have meant guessing — where they sit is not covered " +
+                            "until the baseline is re-recorded.");
+
+            if (notWritten > 0)
+                text.Append($"\n\n{notWritten} other baseline(s) could not be written and are unchanged on disk — " +
+                            "see the console.");
+
+            text.Append("\n\nYour scene was not modified.");
+            return text.ToString();
         }
 
         // ── Getting to the object ────────────────────────────────────────────────
