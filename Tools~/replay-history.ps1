@@ -72,6 +72,20 @@ function Show-NewLines {
     return $Shown
 }
 
+# Start-Process joins -ArgumentList with spaces and quotes nothing it is given, so a project path
+# with a space in it -- C:\Users\Someone\My Games\x, which is most of Windows -- reaches the editor
+# as two arguments and the run dies at step 1 with a project path Unity cannot make sense of. Every
+# value is quoted here instead. A path may end in a backslash, which would escape the closing quote,
+# so a trailing run of them is doubled the way the Windows command line parser expects. The bash
+# twin never had this: "$PROJECT" was quoted there from the start.
+function ConvertTo-QuotedArg {
+    param([string] $Value)
+
+    if ($Value -notmatch '\s') { return $Value }
+
+    return '"' + ($Value -replace '(\\+)$', '$1$1') + '"'
+}
+
 # The way back, read before anything moves. The editor records it too and asks for it as the last
 # checkout of the run; this is the belt to that pair of braces, for a run killed halfway.
 $original = (& git -C $Project rev-parse --abbrev-ref HEAD | Out-String).Trim()
@@ -119,7 +133,8 @@ try {
             Write-Host "Step ${step}: starting the editor."
         }
 
-        $editor = Start-Process -FilePath $Unity -ArgumentList $unityArgs -PassThru
+        $quotedArgs = @($unityArgs | ForEach-Object { ConvertTo-QuotedArg $_ })
+        $editor = Start-Process -FilePath $Unity -ArgumentList $quotedArgs -PassThru
         $shown = 0
 
         while (-not $editor.HasExited) {

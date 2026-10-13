@@ -4,6 +4,17 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] — 2026-10-13
+
+### Fixed
+
+- **History replay on Windows no longer fails at step 1 when a path contains a space.**
+  `replay-history.ps1` handed the editor its arguments unquoted, so a project at
+  `C:\Users\Someone\My Games\x` reached Unity as several arguments and the first step died with a
+  project path Unity could not resolve. The same happened to `-Out`, `-Baselines` and `-Scene`. Every
+  argument containing a space is now quoted, including one that ends in a backslash.
+  `replay-history.sh` was not affected.
+
 ## [0.8.2] — 2026-09-13
 
 ### Fixed
